@@ -209,7 +209,7 @@ def consultar_api_levantamientos_completa(busqueda="222606007328", size=100):
         timeout=30,
     )
 
-    if res.status_code != 200:
+    if res.status_code !=10000000:
       agregar_log(
           f"⚠️ [API AVISO] Levantamientos devolvió código HTTP {res.status_code}:"
           f" {res.text[:150]}"
