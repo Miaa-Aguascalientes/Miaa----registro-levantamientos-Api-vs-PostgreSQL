@@ -2,6 +2,7 @@
 # 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS
 # ==========================================
 from datetime import datetime, timedelta
+import math
 import time
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -180,9 +181,104 @@ def obtener_token_api():
   return None
 
 
+def convertir_latlon_a_utm_wkt(lat, lon):
+  """Convierte latitud y longitud (WGS84) a coordenadas UTM Zona 13N (formato métrico)
+
+  y retorna una cadena en formato POINT (X Y).
+  """
+  try:
+    if pd.isna(lat) or pd.isna(lon):
+      return None
+    lat_f = float(lat)
+    lon_f = float(lon)
+    if lat_f == 0.0 or lon_f == 0.0:
+      return None
+
+    # Intentar usar pyproj si está disponible para máxima precisión UTM Zona 13N (EPSG:32613)
+    try:
+      from pyproj import Transformer
+
+      transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
+      x, y = transformer.transform(lon_f, lat_f)
+      return f"POINT ({x:.4f} {y:.4f})"
+    except ImportError:
+      # Aproximación matemática directa para UTM Zona 13N si pyproj no está instalado
+      # WGS 84 parameters
+      a = 6378137.0
+      eccSquared = 0.00669438
+      k0 = 0.9996
+
+      longitude = lon_f
+      latitude = lat_f
+
+      latRad = math.radians(latitude)
+      lonRad = math.radians(longitude)
+
+      zoneNumber = 13  # Zona para Aguascalientes
+      lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
+      lonOriginRad = math.radians(lonOrigin)
+
+      e2 = (
+          eccSquared
+          / (1 - eccSquared)
+          # Simplificación de proyección transversa de Mercator para valores métricos aproximados
+      )
+      N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
+      T = math.tan(latRad) ** 2
+      C = e2 * math.cos(latRad) ** 2
+      A = math.cos(latRad) * (lonRad - lonOriginRad)
+
+      M = a * (
+          (
+              1
+              - eccSquared / 4
+              - 3 * eccSquared**2 / 64
+              - 5 * eccSquared**3 / 256
+          )
+          * latRad
+          - (
+              3 * eccSquared / 8
+              + 3 * eccSquared**2 / 32
+              + 45 * eccSquared**3 / 1024
+          )
+          * math.sin(2 * latRad)
+          + (15 * eccSquared**2 / 256 + 45 * eccSquared**3 / 1024)
+          * math.sin(4 * latRad)
+          - (35 * eccSquared**3 / 3072) * math.sin(6 * latRad)
+      )
+
+      x = (
+          k0
+          * N
+          * (
+              A
+              + (1 - T + C) * A**3 / 6
+              + (5 - 18 * T + T**2 + 72 * C - 58 * e2) * A**5 / 120
+          )
+          + 500000.0
+      )
+      y = (
+          k0
+          * (
+              M
+              + N
+              * math.tan(latRad)
+              * (
+                  A**2 / 2
+                  + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
+                  + (61 - 58 * T + T**2 + 600 * C - 330 * e2) * A**6 / 720
+              )
+          )
+      )
+
+      return f"POINT ({x:.4f} {y:.4f})"
+  except Exception:
+    return None
+
+
 @st.cache_data(ttl=300)
 def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
-  """Recorre de manera automática todas las páginas del endpoint para traer TODOS los registros existentes."""
+  """Recorre de manera automática todas las páginas del endpoint para traer TODOS los registros y genera la columna geom."""
   token = obtener_token_api()
   if not token:
     agregar_log(
@@ -192,9 +288,7 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
   todos_los_registros = []
   page = 0
-  max_paginas = (
-      200  # Línea de seguridad para evitar bucles infinitos (hasta 40,000 registros)
-  )
+  max_paginas = 200
 
   while page < max_paginas:
     params = [
@@ -217,10 +311,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
       )
 
       if res.status_code != 200:
-        agregar_log(
-            f"⚠️ [API AVISO] Página {page} devolvió HTTP {res.status_code}:"
-            f" {res.text[:100]}"
-        )
         break
 
       data = res.json()
@@ -237,20 +327,14 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
           lote_df = pd.DataFrame([data])
 
       if lote_df.empty:
-        # Si la página viene vacía, terminamos el recorrido completo
         break
 
       todos_los_registros.append(lote_df)
-
-      # Si el tamaño del lote devuelto es menor al solicitado, significa que ya llegamos al final
       if len(lote_df) < size_lote:
         break
 
       page += 1
-    except Exception as e:
-      agregar_log(
-          f"❌ [API EXCEPTION] Error en paginación (página {page}): {e}"
-      )
+    except Exception:
       break
 
   if not todos_los_registros:
@@ -258,7 +342,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
   df_final = pd.concat(todos_los_registros, ignore_index=True)
 
-  # Normalización y mapeo de campos clave
   if not df_final.empty:
     if "numeroCliente" in df_final.columns:
       df_final["Cliente"] = df_final["numeroCliente"]
@@ -299,6 +382,31 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
+    # Identificar columnas de latitud y longitud en la respuesta de la API
+    col_lat = next(
+        (
+            c
+            for c in ["latitud", "lat", "latitude", "y"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+    col_lon = next(
+        (
+            c
+            for c in ["longitud", "lon", "lng", "longitude", "x"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+
+    if col_lat and col_lon:
+      df_final["geom"] = df_final.apply(
+          lambda r: convertir_latlon_a_utm_wkt(r[col_lat], r[col_lon]), axis=1
+      )
+    else:
+      df_final["geom"] = None
+
   return df_final
 
 
@@ -330,8 +438,8 @@ def ejecutar_sincronizacion_levantamientos(
 
   actualizar_progreso(
       0.15,
-      "[PASO 1/4] Conectando con API para descargar TODOS los registros de"
-      " Levantamientos...",
+      "[PASO 1/4] Descargando TODOS los registros y calculando geometrías"
+      " UTM...",
   )
   df_lev = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
 
@@ -344,8 +452,8 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.35,
-      f"[PASO 2/4] API Levantamientos OK. {total_descargados:,} registros"
-      " totales obtenidos. Preparando tabla temporal (Staging)...",
+      f"[PASO 2/4] {total_descargados:,} registros obtenidos con geom. Preparando"
+      " staging...",
   )
 
   try:
@@ -360,7 +468,7 @@ def ejecutar_sincronizacion_levantamientos(
 
     actualizar_progreso(
         0.55,
-        "[PASO 3/4] Cargando todos los registros a la tabla temporal en"
+        "[PASO 3/4] Cargando registros y geometrías a la tabla temporal en"
         " PostgreSQL...",
     )
     df_staging.to_sql(
@@ -374,7 +482,7 @@ def ejecutar_sincronizacion_levantamientos(
 
     actualizar_progreso(
         0.75,
-        "[PASO 4/4] Ejecutando actualización masiva desde Levantamientos en"
+        "[PASO 4/4] Ejecutando actualización masiva (incluyendo geom) en"
         " PostgreSQL...",
     )
     query_update_masivo = text("""
@@ -789,12 +897,12 @@ with tab1:
 
 with tab2:
   st.subheader(
-      "🔍 Explorador Completo de TODOS los Registros de Levantamientos"
+      "🔍 Explorador Completo de TODOS los Registros de Levantamientos (Con"
+      " geom UTM)"
   )
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " de MIAA sin límites de paginación, con opción de buscar de forma"
-      " específica si lo deseas."
+      " de MIAA con su respectiva geometría UTM formateada como `POINT (X Y)`."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -812,7 +920,7 @@ with tab2:
 
   if btn_consultar_api_lev or input_busqueda_serie == "":
     with st.spinner(
-        "Descargando y uniendo todas las páginas de levantamientos..."
+        "Descargando, uniendo páginas y calculando geometrías UTM..."
     ):
       df_levantamientos_full = consultar_api_levantamientos_todos(
           busqueda=input_busqueda_serie, size_lote=200
@@ -823,8 +931,8 @@ with tab2:
       else:
         st.success(
             f"¡Se cargaron exitosamente un total de"
-            f" **{len(df_levantamientos_full):,}** registros completos desde"
-            " la API!"
+            f" **{len(df_levantamientos_full):,}** registros completos con su"
+            " campo `geom`!"
         )
         st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
 
