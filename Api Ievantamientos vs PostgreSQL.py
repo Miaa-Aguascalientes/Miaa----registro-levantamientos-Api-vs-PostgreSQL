@@ -12,7 +12,7 @@ import streamlit as st
 ZONA_MEXICO = ZoneInfo("America/Mexico_City")
 
 st.set_page_config(
-    page_title="Sistema Scada",
+    page_title="Sistema Scada - Levantamientos",
     page_icon="https://www.miaa.mx/favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -114,7 +114,7 @@ st.markdown(
 if "logs" not in st.session_state:
   st.session_state.logs = [
       f"[{datetime.now(ZONA_MEXICO).strftime('%H:%M:%S')}] Sistema inicializado"
-      " correctamente. Esperando ciclo de ejecución..."
+      " correctamente (Módulo de Levantamientos). Esperando ciclo..."
   ]
 
 
@@ -130,7 +130,6 @@ def agregar_log(mensaje):
 # ==========================================
 BASE_URL = "https://prelec.miaa.mx"
 URL_LOGIN_CORRECTA = "/auth/login"
-URL_INSTALACIONES = "https://prelec.miaa.mx/msvc-tecnica/medidores/instalaciones"
 URL_LEVANTAMIENTOS = (
     "https://prelec.miaa.mx/msvc-tecnica/medidores/levantamientos"
 )
@@ -143,7 +142,7 @@ def obtener_motor_postgres():
 
 
 @st.cache_data(ttl=600)
-def obtener_total_registros():
+def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
@@ -154,56 +153,6 @@ def obtener_total_registros():
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
     return 0
-
-
-@st.cache_data(ttl=60)
-def obtener_total_etapa_1():
-  try:
-    engine_pg = obtener_motor_postgres()
-    with engine_pg.connect() as conn:
-      result = conn.execute(
-          text(
-              'SELECT COUNT(*) FROM "Usuarios"."usuarios_miaa_conmedidor"'
-              " WHERE etapa = '1'"
-          )
-      )
-      return result.scalar() or 0
-  except Exception as e:
-    agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de etapa 1: {e}")
-    return 0
-
-
-@st.cache_data(ttl=60)
-def obtener_total_etapa_2():
-  try:
-    engine_pg = obtener_motor_postgres()
-    with engine_pg.connect() as conn:
-      result = conn.execute(
-          text(
-              'SELECT COUNT(*) FROM "Usuarios"."usuarios_miaa_conmedidor"'
-              " WHERE etapa = '2'"
-          )
-      )
-      return result.scalar() or 0
-  except Exception as e:
-    agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de etapa 2: {e}")
-    return 0
-
-
-@st.cache_data(ttl=60)
-def cargar_pagina_usuarios_db(limit=50, offset=0):
-  try:
-    engine_pg = obtener_motor_postgres()
-    query = text(
-        'SELECT * FROM "Usuarios"."usuarios_miaa_conmedidor" LIMIT :lim OFFSET'
-        " :off"
-    )
-    return pd.read_sql(
-        query, con=engine_pg, params={"lim": limit, "off": offset}
-    )
-  except Exception as e:
-    agregar_log(f"❌ [ERROR DB] Error al cargar página de PostgreSQL: {e}")
-    return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
@@ -232,113 +181,18 @@ def obtener_token_api():
 
 
 @st.cache_data(ttl=300)
-def cargar_datos_api():
-  """Conecta con la API de instalaciones de MIAA con reintentos automáticos."""
-  token = obtener_token_api()
-  if not token:
-    st.error("Error de Autenticación o la API no responde tras varios intentos.")
-    return pd.DataFrame()
-
-  max_intentos = 3
-  data = None
-  es_exitoso = False
-
-  for intento in range(1, max_intentos + 1):
-    try:
-      res_inst = requests.get(
-          URL_INSTALACIONES,
-          headers={
-              "Content-Type": "application/json",
-              "Authorization": f"Bearer {token}",
-          },
-          timeout=45,
-      )
-
-      if res_inst.status_code == 503:
-        agregar_log(
-            f"⚠️ [AVISO API] Intento {intento}/{max_intentos}: El servicio de"
-            " técnica devolvió 503. Reintentando..."
-        )
-        time.sleep(3)
-        continue
-
-      if res_inst.status_code != 200:
-        return pd.DataFrame()
-
-      data = res_inst.json()
-      es_exitoso = True
-      break
-    except requests.exceptions.RequestException:
-      time.sleep(3)
-
-  if not es_exitoso or data is None:
-    return pd.DataFrame()
-
-  df = pd.DataFrame()
-  if isinstance(data, list):
-    df = pd.DataFrame(data)
-  elif isinstance(data, dict):
-    for key in ["data", "result", "items", "instalaciones"]:
-      if key in data and isinstance(data[key], list):
-        df = pd.DataFrame(data[key])
-        break
-    if df.empty:
-      df = pd.DataFrame([data])
-
-  if not df.empty:
-    if "numeroCliente" in df.columns:
-      df["Cliente"] = df["numeroCliente"]
-    elif "numero_cliente" in df.columns:
-      df["Cliente"] = df["numero_cliente"]
-    elif "numCliente" in df.columns:
-      df["Cliente"] = df["numCliente"]
-
-    col_api_predio = next(
-        (
-            c
-            for c in ["predio", "predioViv", "predio_viv", "numeroPredio"]
-            if c in df.columns
-        ),
-        None,
-    )
-    col_api_unidad = next(
-        (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df.columns),
-        None,
-    )
-
-    def construir_predio_viv(row):
-      if not col_api_predio:
-        return ""
-      p = row[col_api_predio]
-      if pd.isna(p) or str(p).strip().lower() in ["none", "nan", ""]:
-        return ""
-      p_str = str(p).strip()
-      u = (
-          row[col_api_unidad]
-          if col_api_unidad and pd.notna(row[col_api_unidad])
-          else 0
-      )
-      u_str = str(u).strip()
-      if u_str.lower() in ["none", "nan", ""]:
-        u_str = "0"
-      return f"{p_str}-{u_str}"
-
-    df["Predio_Viv"] = df.apply(construir_predio_viv, axis=1)
-
-  return df
-
-
 def consultar_api_levantamientos(busqueda=""):
-  """Consulta el endpoint específico de levantamientos con parámetros de paginación y búsqueda por serie."""
+  """Consulta el endpoint de levantamientos asegurando el parseo de listas y objetos anidados."""
   token = obtener_token_api()
   if not token:
+    agregar_log("❌ [API ERROR] No se pudo autenticar para consultar Levantamientos.")
     return pd.DataFrame()
 
   params = {
       "page": 0,
-      "size": 50,
+      "size": 100,
       "busqueda": busqueda,
-      "sort": ["serie,asc", "predio,asc"],
+      "sort": "serie,asc",
   }
 
   try:
@@ -351,29 +205,77 @@ def consultar_api_levantamientos(busqueda=""):
         params=params,
         timeout=30,
     )
-    if res.status_code == 200:
-      data = res.json()
-      df = pd.DataFrame()
-      if isinstance(data, list):
-        df = pd.DataFrame(data)
-      elif isinstance(data, dict):
-        for key in ["content", "data", "result", "items", "levantamientos"]:
-          if key in data and isinstance(data[key], list):
-            df = pd.DataFrame(data[key])
-            break
-        if df.empty:
-          df = pd.DataFrame([data])
-      return df
+
+    if res.status_code != 200:
+      agregar_log(
+          f"⚠️ [API AVISO] Levantamientos devolvió código HTTP {res.status_code}:"
+          f" {res.text[:150]}"
+      )
+      return pd.DataFrame()
+
+    data = res.json()
+    df = pd.DataFrame()
+
+    if isinstance(data, list):
+      df = pd.DataFrame(data)
+    elif isinstance(data, dict):
+      for key in ["content", "data", "result", "items", "levantamientos"]:
+        if key in data and isinstance(data[key], list):
+          df = pd.DataFrame(data[key])
+          break
+      if df.empty:
+        df = pd.DataFrame([data])
+
+    if not df.empty:
+      if "numeroCliente" in df.columns:
+        df["Cliente"] = df["numeroCliente"]
+      elif "numero_cliente" in df.columns:
+        df["Cliente"] = df["numero_cliente"]
+      elif "numCliente" in df.columns:
+        df["Cliente"] = df["numCliente"]
+
+      col_api_predio = next(
+          (
+              c
+              for c in ["predio", "predioViv", "predio_viv", "numeroPredio"]
+              if c in df.columns
+          ),
+          None,
+      )
+      col_api_unidad = next(
+          (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df.columns),
+          None,
+      )
+
+      def construir_predio_viv(row):
+        if not col_api_predio:
+          return ""
+        p = row[col_api_predio]
+        if pd.isna(p) or str(p).strip().lower() in ["none", "nan", ""]:
+          return ""
+        p_str = str(p).strip()
+        u = (
+            row[col_api_unidad]
+            if col_api_unidad and pd.notna(row[col_api_unidad])
+            else 0
+        )
+        u_str = str(u).strip()
+        if u_str.lower() in ["none", "nan", ""]:
+          u_str = "0"
+        return f"{p_str}-{u_str}"
+
+      df["Predio_Viv"] = df.apply(construir_predio_viv, axis=1)
+
+    return df
   except Exception as e:
-    agregar_log(f"❌ [API LEVANTAMIENTOS] Error en consulta: {e}")
-
-  return pd.DataFrame()
+    agregar_log(f"❌ [API EXCEPTION] Error al consultar Levantamientos: {e}")
+    return pd.DataFrame()
 
 
 # ==========================================
-# 4. FUNCIÓN DE CRUCE ULTRA RÁPIDO (STAGING + SQL)
+# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA (LEVANTAMIENTOS)
 # ==========================================
-def ejecutar_sincronizacion_automatica(
+def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
     texto_estado_placeholder=None,
     consola_placeholder=None,
@@ -398,26 +300,27 @@ def ejecutar_sincronizacion_automatica(
 
   actualizar_progreso(
       0.15,
-      "[PASO 1/4] Conectando con API de instalaciones para descargar registros...",
+      "[PASO 1/4] Conectando con API de Levantamientos para descargar"
+      " registros...",
   )
-  df_filtrado = cargar_datos_api()
+  df_lev = consultar_api_levantamientos(busqueda="")
 
-  if df_filtrado.empty:
+  if df_lev.empty:
     actualizar_progreso(
-        1.0, "[ERROR] No se pudo obtener respuesta o datos válidos de la API."
+        1.0, "[ERROR] No se pudo obtener respuesta o datos del endpoint."
     )
     return False
 
-  total_descargados = len(df_filtrado)
+  total_descargados = len(df_lev)
   actualizar_progreso(
       0.35,
-      f"[PASO 2/4] API OK. {total_descargados:,} registros descargados."
-      " Preparando tabla temporal en PostgreSQL...",
+      f"[PASO 2/4] API Levantamientos OK. {total_descargados:,} registros"
+      " obtenidos. Preparando tabla temporal (Staging)...",
   )
 
   try:
     engine_pg = obtener_motor_postgres()
-    df_staging = df_filtrado.copy()
+    df_staging = df_lev.copy()
     if "Predio_Viv" not in df_staging.columns:
       return False
 
@@ -427,11 +330,11 @@ def ejecutar_sincronizacion_automatica(
 
     actualizar_progreso(
         0.55,
-        "[PASO 3/4] Cargando datos de la API a la tabla temporal (Staging)"
+        "[PASO 3/4] Cargando registros de Levantamientos a la tabla temporal"
         " en PostgreSQL...",
     )
     df_staging.to_sql(
-        "_staging_api_instalaciones",
+        "_staging_api_levantamientos",
         con=engine_pg,
         schema="Usuarios",
         if_exists="replace",
@@ -441,7 +344,7 @@ def ejecutar_sincronizacion_automatica(
 
     actualizar_progreso(
         0.75,
-        "[PASO 4/4] Ejecutando actualización masiva (UPDATE FROM JOIN) en"
+        "[PASO 4/4] Ejecutando actualización masiva desde Levantamientos en"
         " PostgreSQL...",
     )
     query_update_masivo = text("""
@@ -465,14 +368,9 @@ def ejecutar_sincronizacion_automatica(
                     THEN CAST(s."fechaRegistro" AS TIMESTAMP WITH TIME ZONE)
                     ELSE u."_Fecha_registro"
                 END,
-                "_Fecha_instalacion" = CASE 
-                    WHEN s."fechaInstalacion" IS NOT NULL AND TRIM(CAST(s."fechaInstalacion" AS TEXT)) NOT IN ('', 'none', 'nan', 'null') 
-                    THEN CAST(s."fechaInstalacion" AS TIMESTAMP WITH TIME ZONE)
-                    ELSE u."_Fecha_instalacion"
-                END,
                 "_Ultima_actualizacion" = :tiempo_actual,
                 etapa = '2'
-            FROM "Usuarios"."_staging_api_instalaciones" AS s
+            FROM "Usuarios"."_staging_api_levantamientos" AS s
             WHERE TRIM(CAST(u."Predio_Viv" AS TEXT)) = s."Predio_Viv_clean"
               AND s."Predio_Viv_clean" NOT IN ('none', 'nan', '', 'nat', '0', 'null', 'None', 'NaN');
         """)
@@ -487,19 +385,20 @@ def ejecutar_sincronizacion_automatica(
           result_up.rowcount if hasattr(result_up, "rowcount") else 0
       )
       conn.execute(
-          text('DROP TABLE IF EXISTS "Usuarios"."_staging_api_instalaciones"')
+          text('DROP TABLE IF EXISTS "Usuarios"."_staging_api_levantamientos"')
       )
       conn.commit()
 
     actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización completada. Registros actualizados:"
-        f" {filas_actualizadas:,}.",
+        f"🎉 [CICLO EXITOSO] Sincronización de Levantamientos completada."
+        f" Registros actualizados: {filas_actualizadas:,}.",
     )
     return True
   except Exception as ex:
     actualizar_progreso(
-        1.0, f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
+        1.0,
+        f"[ERROR CRÍTICO] Falló la sincronización de Levantamientos en DB: {ex}",
     )
     return False
 
@@ -539,16 +438,14 @@ if "intervalo_minutos_sel" not in st.session_state:
 # ==========================================
 # 6. CARGA DE DATOS PARA INDICADORES Y VISTAS
 # ==========================================
-total_registros_db = obtener_total_registros()
-total_etapa_1_db = obtener_total_etapa_1()
-total_etapa_2_db = obtener_total_etapa_2()
-df_filtrado = cargar_datos_api()
+total_registros_db = obtener_total_registros_levantamientos_db()
+df_lev_preview = consultar_api_levantamientos(busqueda="")
 
-total_serie_api = 0
-if not df_filtrado.empty:
-  if "serie" in df_filtrado.columns:
-    ts = df_filtrado["serie"].dropna().astype(str).str.strip()
-    total_serie_api = ts[
+total_serie_api_lev = 0
+if not df_lev_preview.empty:
+  if "serie" in df_lev_preview.columns:
+    ts = df_lev_preview["serie"].dropna().astype(str).str.strip()
+    total_serie_api_lev = ts[
         ~ts.str.lower().isin(["", "none", "nan", "null"])
     ].count()
 
@@ -576,7 +473,7 @@ with st.sidebar:
       "https://raw.githubusercontent.com/Miaa-Aguascalientes/Logos/38504978c8f77a4dac38ad476f74dbdee6af2cad/LogoMIAA.svg",
       use_container_width=True,
   )
-  st.markdown("### 🚰 Panel de Control MIAA")
+  st.markdown("### 🚰 Panel Levantamientos MIAA")
   st.markdown("---")
   st.markdown("#### ⚙ Configuración")
 
@@ -622,7 +519,7 @@ with st.sidebar:
 st.markdown(
     """
     <div style="text-align: center; margin-top: -20px; margin-bottom: 10px;">
-        <h2 style="color: #f8fafc; font-weight: 700;">MIAA - Sistema de Registros e Instalaciones</h2>
+        <h2 style="color: #f8fafc; font-weight: 700;">MIAA - Módulo de Levantamientos y Sincronización</h2>
     </div>
     """,
     unsafe_allow_html=True,
@@ -635,8 +532,8 @@ with col_ind1:
         <div class="metric-card">
             <div style="font-size: 28px; margin-right: 15px;">🎯</div>
             <div class="metric-content">
-                <div class="metric-title">REGISTROS API CON SERIE</div>
-                <div class="metric-value">{total_serie_api:,}</div>
+                <div class="metric-title">LEVANTAMIENTOS API CON SERIE</div>
+                <div class="metric-value">{total_serie_api_lev:,}</div>
             </div>
         </div>
     """,
@@ -659,10 +556,10 @@ with col_ind3:
   st.markdown(
       f"""
         <div class="metric-card">
-            <div style="font-size: 28px; margin-right: 15px;">🔢</div>
+            <div style="font-size: 28px; margin-right: 15px;">📊</div>
             <div class="metric-content">
-                <div class="metric-title">MEDIDORES ETAPA 1 / 2</div>
-                <div class="metric-value" style="font-size: 16px; margin-top: 2px;">1: {total_etapa_1_db:,} | 2: {total_etapa_2_db:,}</div>
+                <div class="metric-title">TOTAL REGISTROS DB</div>
+                <div class="metric-value">{total_registros_db:,}</div>
             </div>
         </div>
     """,
@@ -670,16 +567,16 @@ with col_ind3:
   )
 with col_ind4:
   porcentaje_cobertura = (
-      min(100.0, (total_serie_pg_lleno / total_serie_api) * 100)
-      if total_serie_api > 0
+      min(100.0, (total_serie_pg_lleno / total_serie_api_lev) * 100)
+      if total_serie_api_lev > 0
       else 0.0
   )
   st.markdown(
       f"""
         <div class="metric-card">
-            <div style="font-size: 28px; margin-right: 15px;">📊</div>
+            <div style="font-size: 28px; margin-right: 15px;">📈</div>
             <div class="metric-content">
-                <div class="metric-title">SINCRONIZACIÓN</div>
+                <div class="metric-title">COBERTURA</div>
                 <div class="metric-value">{porcentaje_cobertura:.1f}%</div>
             </div>
         </div>
@@ -707,7 +604,7 @@ with col_consola:
 if st.session_state.is_running and st.session_state.next_run_time:
   ahora = datetime.now(ZONA_MEXICO)
   if ahora >= st.session_state.next_run_time:
-    ejecutar_sincronizacion_automatica(
+    ejecutar_sincronizacion_levantamientos(
         barra_progreso_placeholder,
         estado_ejecucion_placeholder,
         consola_placeholder,
@@ -777,7 +674,6 @@ with col_limpieza:
         "_Tipo_instalador",
         "_Lectura_actual",
         "_Fecha_registro",
-        "_Fecha_instalacion",
         "_Ultima_actualizacion",
         "etapa",
     ]
@@ -825,11 +721,9 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # ==========================================
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🚰 Panel Principal",
-    "📋 Tablas de Datos",
-    "🛠️ Medidores Inteligentes",
-    "🔍 API Levantamientos",
+tab1, tab2 = st.tabs([
+    "🚰 Panel Principal PostgreSQL",
+    "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
@@ -839,90 +733,37 @@ with tab1:
       unsafe_allow_html=True,
   )
   if total_registros_db > 0:
-    c_m1, c_m2, c_m3 = st.columns(3)
-    with c_m1:
-      st.markdown(
-          f"""
-                <div class="metric-card">
-                    <div class="metric-content">
-                        <div class="metric-title">Total Registros (PG)</div>
-                        <div class="metric-value">{total_registros_db:,}</div>
-                    </div>
-                </div>
-            """,
-          unsafe_allow_html=True,
+    try:
+      engine_pg = obtener_motor_postgres()
+      t2_filas = 50
+      t2_total_pags = max(
+          1,
+          (total_registros_db // t2_filas)
+          + (1 if total_registros_db % t2_filas > 0 else 0),
       )
-    with c_m2:
-      st.markdown(
-          """
-                <div class="metric-card">
-                    <div class="metric-content">
-                        <div class="metric-title">Estado de Carga</div>
-                        <div class="metric-value" style="font-size: 15px; margin-top: 5px;">Consola en Vivo (Staging SQL)</div>
-                    </div>
-                </div>
-            """,
-          unsafe_allow_html=True,
+      t2_pag = st.selectbox(
+          "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
       )
-    with c_m3:
-      st.markdown(
-          """
-                <div class="metric-card">
-                    <div class="metric-content">
-                        <div class="metric-title">Rendimiento</div>
-                        <div class="metric-value" style="font-size: 15px; margin-top: 5px;">Ultra Rápido (Servidor DB)</div>
-                    </div>
-                </div>
-            """,
-          unsafe_allow_html=True,
+      df_t2 = pd.read_sql(
+          text(
+              'SELECT * FROM "Usuarios"."usuarios_miaa_conmedidor" LIMIT :lim'
+              " OFFSET :off"
+          ),
+          con=engine_pg,
+          params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
       )
-
-with tab2:
-  st.subheader(
-      "🚰 Tabla 1: usuarios_miaa_conmedidor (PostgreSQL - Bloques SQL)"
-  )
-  if total_registros_db > 0:
-    t2_filas = 50
-    t2_total_pags = max(
-        1,
-        (total_registros_db // t2_filas)
-        + (1 if total_registros_db % t2_filas > 0 else 0),
-    )
-    t2_pag = st.selectbox(
-        "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
-    )
-    df_t2 = cargar_pagina_usuarios_db(limit=t2_filas, offset=(t2_pag - 1) * t2_filas)
-    st.dataframe(df_t2, use_container_width=True, height=350)
+      st.dataframe(df_t2, use_container_width=True, height=450)
+    except Exception as e:
+      st.error(f"Error al cargar datos de PostgreSQL: {e}")
   else:
     st.warning("No hay datos cargados de PostgreSQL.")
 
-with tab3:
-  st.subheader("🛠 Gestión de la tabla: medidores_inteligentes")
-  with st.container(border=True):
-    st.markdown("#### 🔢 Asignar Etapa 1 a todos los registros")
-    if st.button(
-        "Establecer etapa = 1 en toda la tabla",
-        type="primary",
-        key="btn_etapa_1_mi",
-    ):
-      try:
-        engine_pg = obtener_motor_postgres()
-        with engine_pg.connect() as conn:
-          conn.execute(
-              text('UPDATE "Medidores"."medidores_inteligentes" SET etapa = \'1\'')
-          )
-          conn.commit()
-        st.success("¡Etapa 1 asignada correctamente a medidores_inteligentes!")
-        st.rerun()
-      except Exception as e:
-        st.error(f"Error: {e}")
-
-with tab4:
+with tab2:
   st.subheader(
       "🔍 Explorador y Consulta del Endpoint de Levantamientos de MIAA"
   )
   st.markdown(
-      "Consulta directamente los registros devueltos por el endpoint"
+      "Consulta en tiempo real los registros devueltos por el endpoint"
       " `/msvc-tecnica/medidores/levantamientos`, aplicando filtros por número"
       " de serie o predio."
   )
@@ -954,24 +795,29 @@ with tab4:
       else:
         st.success(
             f"Se encontraron **{len(df_levantamientos_res):,}** registros"
-            " disponibles en el endpoint."
+            " disponibles en el endpoint de Levantamientos."
         )
         st.dataframe(df_levantamientos_res, use_container_width=True, height=450)
 
         with st.container(border=True):
           st.markdown(
-              "#### ⚙ Automatización e Inserción a PostgreSQL (Próximamente)"
+              "#### ⚙ Sincronización Manual de Levantamientos a PostgreSQL"
           )
           st.markdown(
-              "Aquí podrás activar la sincronización automática de este"
-              " endpoint hacia tu base de datos con base en el intervalo de"
-              " tiempo configurado en la barra lateral."
+              "Puedes ejecutar la actualización masiva inmediata utilizando"
+              " este subconjunto o activar el temporizador en la barra lateral."
           )
           if st.button(
-              "Guardar/Sincronizar Levantamientos en PostgreSQL",
-              key="btn_sinc_levantamientos",
+              "Sincronizar Levantamientos Ahora",
+              key="btn_sinc_levantamientos_manual",
+              type="primary",
           ):
-            st.info(
-                "La estructura de inserción automática para este endpoint está"
-                " lista para ser vinculada a tu esquema de PostgreSQL."
-            )
+            with st.spinner("Sincronizando datos..."):
+              exito = ejecutar_sincronizacion_levantamientos()
+              if exito:
+                st.success(
+                    "¡Sincronización de levantamientos completada con éxito!"
+                )
+                st.rerun()
+              else:
+                st.error("Ocurrió un error durante la sincronización.")
