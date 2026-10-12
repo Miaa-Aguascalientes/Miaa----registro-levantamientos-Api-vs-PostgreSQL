@@ -181,8 +181,8 @@ def obtener_token_api():
 
 
 @st.cache_data(ttl=300)
-def consultar_api_levantamientos_completa(busqueda="222606007328", size=100):
-  """Consulta el endpoint de levantamientos trayendo un lote amplio de registros con todos sus campos."""
+def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
+  """Recorre de manera automática todas las páginas del endpoint para traer TODOS los registros existentes."""
   token = obtener_token_api()
   if not token:
     agregar_log(
@@ -190,90 +190,116 @@ def consultar_api_levantamientos_completa(busqueda="222606007328", size=100):
     )
     return pd.DataFrame()
 
-  params = [
-      ("page", 0),
-      ("size", size),
-      ("busqueda", busqueda),
-      ("sort", "serie,asc"),
-      ("sort", "predio,asc"),
-  ]
+  todos_los_registros = []
+  page = 0
+  max_paginas = (
+      200  # Línea de seguridad para evitar bucles infinitos (hasta 40,000 registros)
+  )
 
-  try:
-    res = requests.get(
-        URL_LEVANTAMIENTOS,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        params=params,
-        timeout=30,
+  while page < max_paginas:
+    params = [
+        ("page", page),
+        ("size", size_lote),
+        ("busqueda", busqueda),
+        ("sort", "serie,asc"),
+        ("sort", "predio,asc"),
+    ]
+
+    try:
+      res = requests.get(
+          URL_LEVANTAMIENTOS,
+          headers={
+              "Content-Type": "application/json",
+              "Authorization": f"Bearer {token}",
+          },
+          params=params,
+          timeout=30,
+      )
+
+      if res.status_code != 200:
+        agregar_log(
+            f"⚠️ [API AVISO] Página {page} devolvió HTTP {res.status_code}:"
+            f" {res.text[:100]}"
+        )
+        break
+
+      data = res.json()
+      lote_df = pd.DataFrame()
+
+      if isinstance(data, list):
+        lote_df = pd.DataFrame(data)
+      elif isinstance(data, dict):
+        for key in ["content", "data", "result", "items", "levantamientos"]:
+          if key in data and isinstance(data[key], list):
+            lote_df = pd.DataFrame(data[key])
+            break
+        if lote_df.empty:
+          lote_df = pd.DataFrame([data])
+
+      if lote_df.empty:
+        # Si la página viene vacía, terminamos el recorrido completo
+        break
+
+      todos_los_registros.append(lote_df)
+
+      # Si el tamaño del lote devuelto es menor al solicitado, significa que ya llegamos al final
+      if len(lote_df) < size_lote:
+        break
+
+      page += 1
+    except Exception as e:
+      agregar_log(
+          f"❌ [API EXCEPTION] Error en paginación (página {page}): {e}"
+      )
+      break
+
+  if not todos_los_registros:
+    return pd.DataFrame()
+
+  df_final = pd.concat(todos_los_registros, ignore_index=True)
+
+  # Normalización y mapeo de campos clave
+  if not df_final.empty:
+    if "numeroCliente" in df_final.columns:
+      df_final["Cliente"] = df_final["numeroCliente"]
+    elif "numero_cliente" in df_final.columns:
+      df_final["Cliente"] = df_final["numero_cliente"]
+    elif "numCliente" in df_final.columns:
+      df_final["Cliente"] = df_final["numCliente"]
+
+    col_api_predio = next(
+        (
+            c
+            for c in ["predio", "predioViv", "predio_viv", "numeroPredio"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+    col_api_unidad = next(
+        (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df_final.columns),
+        None,
     )
 
-    if res.status_code !=10000000:
-      agregar_log(
-          f"⚠️ [API AVISO] Levantamientos devolvió código HTTP {res.status_code}:"
-          f" {res.text[:150]}"
+    def construir_predio_viv(row):
+      if not col_api_predio:
+        return ""
+      p = row[col_api_predio]
+      if pd.isna(p) or str(p).strip().lower() in ["none", "nan", ""]:
+        return ""
+      p_str = str(p).strip()
+      u = (
+          row[col_api_unidad]
+          if col_api_unidad and pd.notna(row[col_api_unidad])
+          else 0
       )
-      return pd.DataFrame()
+      u_str = str(u).strip()
+      if u_str.lower() in ["none", "nan", ""]:
+        u_str = "0"
+      return f"{p_str}-{u_str}"
 
-    data = res.json()
-    df = pd.DataFrame()
+    df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
-    # Mapeo robusto por si la respuesta viene paginada o en lista directa
-    if isinstance(data, list):
-      df = pd.DataFrame(data)
-    elif isinstance(data, dict):
-      for key in ["content", "data", "result", "items", "levantamientos"]:
-        if key in data and isinstance(data[key], list):
-          df = pd.DataFrame(data[key])
-          break
-      if df.empty:
-        df = pd.DataFrame([data])
-
-    if not df.empty:
-      if "numeroCliente" in df.columns:
-        df["Cliente"] = df["numeroCliente"]
-      elif "numero_cliente" in df.columns:
-        df["Cliente"] = df["numero_cliente"]
-      elif "numCliente" in df.columns:
-        df["Cliente"] = df["numCliente"]
-
-      col_api_predio = next(
-          (
-              c
-              for c in ["predio", "predioViv", "predio_viv", "numeroPredio"]
-              if c in df.columns
-          ),
-          None,
-      )
-      col_api_unidad = next(
-          (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df.columns),
-          None,
-      )
-
-      def construir_predio_viv(row):
-        if not col_api_predio:
-          return ""
-        p = row[col_api_predio]
-        if pd.isna(p) or str(p).strip().lower() in ["none", "nan", ""]:
-          return ""
-        p_str = str(p).strip()
-        u = (
-            row[col_api_unidad]
-            if col_api_unidad and pd.notna(row[col_api_unidad])
-            else 0
-        )
-        u_str = str(u).strip()
-        if u_str.lower() in ["none", "nan", ""]:
-          u_str = "0"
-        return f"{p_str}-{u_str}"
-
-      df["Predio_Viv"] = df.apply(construir_predio_viv, axis=1)
-
-    return df
-  except Exception as e:
-    agregar_log(f"❌ [API EXCEPTION] Error al consultar Levantamientos: {e}")
-    return pd.DataFrame()
+  return df_final
 
 
 # ==========================================
@@ -304,10 +330,10 @@ def ejecutar_sincronizacion_levantamientos(
 
   actualizar_progreso(
       0.15,
-      "[PASO 1/4] Conectando con API de Levantamientos para descargar"
-      " registros...",
+      "[PASO 1/4] Conectando con API para descargar TODOS los registros de"
+      " Levantamientos...",
   )
-  df_lev = consultar_api_levantamientos_completa(busqueda="", size=500)
+  df_lev = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
 
   if df_lev.empty:
     actualizar_progreso(
@@ -319,7 +345,7 @@ def ejecutar_sincronizacion_levantamientos(
   actualizar_progreso(
       0.35,
       f"[PASO 2/4] API Levantamientos OK. {total_descargados:,} registros"
-      " obtenidos. Preparando tabla temporal (Staging)...",
+      " totales obtenidos. Preparando tabla temporal (Staging)...",
   )
 
   try:
@@ -334,8 +360,8 @@ def ejecutar_sincronizacion_levantamientos(
 
     actualizar_progreso(
         0.55,
-        "[PASO 3/4] Cargando registros de Levantamientos a la tabla temporal"
-        " en PostgreSQL...",
+        "[PASO 3/4] Cargando todos los registros a la tabla temporal en"
+        " PostgreSQL...",
     )
     df_staging.to_sql(
         "_staging_api_levantamientos",
@@ -442,9 +468,7 @@ if "intervalo_minutos_sel" not in st.session_state:
 # 6. CARGA DE DATOS PARA INDICADORES Y VISTAS
 # ==========================================
 total_registros_db = obtener_total_registros_levantamientos_db()
-df_lev_preview = consultar_api_levantamientos_completa(
-    busqueda="222606007328", size=20
-)
+df_lev_preview = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
 
 total_serie_api_lev = 0
 if not df_lev_preview.empty:
@@ -537,8 +561,8 @@ with col_ind1:
         <div class="metric-card">
             <div style="font-size: 28px; margin-right: 15px;">🎯</div>
             <div class="metric-content">
-                <div class="metric-title">LEVANTAMIENTOS API CON SERIE</div>
-                <div class="metric-value">{total_serie_api_lev:,}</div>
+                <div class="metric-title">TOTAL LEVANTAMIENTOS API</div>
+                <div class="metric-value">{len(df_lev_preview):,}</div>
             </div>
         </div>
     """,
@@ -572,8 +596,8 @@ with col_ind3:
   )
 with col_ind4:
   porcentaje_cobertura = (
-      min(100.0, (total_serie_pg_lleno / total_serie_api_lev) * 100)
-      if total_serie_api_lev > 0
+      min(100.0, (total_serie_pg_lleno / len(df_lev_preview)) * 100)
+      if len(df_lev_preview) > 0
       else 0.0
   )
   st.markdown(
@@ -728,7 +752,7 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # ==========================================
 tab1, tab2 = st.tabs([
     "🚰 Panel Principal PostgreSQL",
-    "🔍 Explorador y Todos los Campos de API Levantamientos",
+    "🔍 Explorador y Todos los Registros de API Levantamientos",
 ])
 
 with tab1:
@@ -765,60 +789,53 @@ with tab1:
 
 with tab2:
   st.subheader(
-      "🔍 Explorador Completo de Registros y Todos los Campos de Levantamientos"
+      "🔍 Explorador Completo de TODOS los Registros de Levantamientos"
   )
   st.markdown(
-      "Visualiza de forma completa todos los campos y registros devueltos por"
-      " el endpoint de levantamientos de MIAA, con opción de ajustar el tamaño"
-      " del lote o buscar por serie/predio."
+      "Visualiza absolutamente todos los registros existentes en el servidor"
+      " de MIAA sin límites de paginación, con opción de buscar de forma"
+      " específica si lo deseas."
   )
 
-  col_busq1, col_busq2, col_busq3 = st.columns([2, 1, 1])
+  col_busq1, col_busq2 = st.columns([3, 1])
   with col_busq1:
     input_busqueda_serie = st.text_input(
-        "Filtro de Búsqueda (Serie / Predio)",
+        "Filtro opcional (Dejar vacío para ver TODOS)",
         value="",
         key="input_busq_levantamientos_full",
     )
   with col_busq2:
-    tamanio_lote = st.selectbox(
-        "Registros a mostrar", [20, 50, 100, 200, 500], index=1
-    )
-  with col_busq3:
     st.markdown("<br>", unsafe_allow_html=True)
     btn_consultar_api_lev = st.button(
-        "Consultar API Completa", type="primary", use_container_width=True
+        "Cargar Todos los Registros", type="primary", use_container_width=True
     )
 
   if btn_consultar_api_lev or input_busqueda_serie == "":
-    with st.spinner("Consultando todos los registros de levantamientos..."):
-      df_levantamientos_full = consultar_api_levantamientos_completa(
-          busqueda=input_busqueda_serie, size=tamanio_lote
+    with st.spinner(
+        "Descargando y uniendo todas las páginas de levantamientos..."
+    ):
+      df_levantamientos_full = consultar_api_levantamientos_todos(
+          busqueda=input_busqueda_serie, size_lote=200
       )
 
       if df_levantamientos_full.empty:
-        st.warning(
-            "No se encontraron registros en el endpoint para el filtro"
-            f" especificado: `{input_busqueda_serie}`"
-        )
+        st.warning("No se encontraron registros en el endpoint.")
       else:
         st.success(
-            f"Se cargaron exitosamente **{len(df_levantamientos_full):,}**"
-            " registros con todos sus campos desde la API de Levantamientos."
+            f"¡Se cargaron exitosamente un total de"
+            f" **{len(df_levantamientos_full):,}** registros completos desde"
+            " la API!"
         )
         st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
 
         with st.container(border=True):
+          st.markdown("#### ⚙ Sincronización Masiva a PostgreSQL")
           st.markdown(
-              "#### ⚙ Sincronización Manual Masiva de Levantamientos a"
-              " PostgreSQL"
-          )
-          st.markdown(
-              "Ejecuta el cruce masivo inmediato utilizando los datos"
-              " obtenidos de la API."
+              "Ejecuta el cruce masivo inmediato utilizando todo el universo de"
+              " registros descargados."
           )
           if st.button(
-              "Sincronizar Lote de Levantamientos a PostgreSQL",
+              "Sincronizar Todos los Registros a PostgreSQL",
               key="btn_sinc_levantamientos_manual",
               type="primary",
           ):
@@ -826,8 +843,7 @@ with tab2:
               exito = ejecutar_sincronizacion_levantamientos()
               if exito:
                 st.success(
-                    "¡Sincronización masiva de levantamientos completada con"
-                    " éxito!"
+                    "¡Sincronización masiva completada con éxito!"
                 )
                 st.rerun()
               else:
