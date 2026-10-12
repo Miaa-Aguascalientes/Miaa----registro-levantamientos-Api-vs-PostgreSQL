@@ -181,19 +181,23 @@ def obtener_token_api():
 
 
 @st.cache_data(ttl=300)
-def consultar_api_levantamientos(busqueda=""):
-  """Consulta el endpoint de levantamientos asegurando el parseo de listas y objetos anidados."""
+def consultar_api_levantamientos(busqueda="222606007328"):
+  """Consulta el endpoint de levantamientos con los parámetros exactos requeridos."""
   token = obtener_token_api()
   if not token:
-    agregar_log("❌ [API ERROR] No se pudo autenticar para consultar Levantamientos.")
+    agregar_log(
+        "❌ [API ERROR] No se pudo autenticar para consultar Levantamientos."
+    )
     return pd.DataFrame()
 
-  params = {
-      "page": 0,
-      "size": 100,
-      "busqueda": busqueda,
-      "sort": "serie,asc",
-  }
+  # Usamos una lista de tuplas para permitir múltiples parámetros 'sort' con el mismo nombre
+  params = [
+      ("page", 0),
+      ("size", 20),
+      ("busqueda", busqueda),
+      ("sort", "serie,asc"),
+      ("sort", "predio,asc"),
+  ]
 
   try:
     res = requests.get(
@@ -303,7 +307,7 @@ def ejecutar_sincronizacion_levantamientos(
       "[PASO 1/4] Conectando con API de Levantamientos para descargar"
       " registros...",
   )
-  df_lev = consultar_api_levantamientos(busqueda="")
+  df_lev = consultar_api_levantamientos(busqueda="222606007328")
 
   if df_lev.empty:
     actualizar_progreso(
@@ -439,7 +443,7 @@ if "intervalo_minutos_sel" not in st.session_state:
 # 6. CARGA DE DATOS PARA INDICADORES Y VISTAS
 # ==========================================
 total_registros_db = obtener_total_registros_levantamientos_db()
-df_lev_preview = consultar_api_levantamientos(busqueda="")
+df_lev_preview = consultar_api_levantamientos(busqueda="222606007328")
 
 total_serie_api_lev = 0
 if not df_lev_preview.empty:
