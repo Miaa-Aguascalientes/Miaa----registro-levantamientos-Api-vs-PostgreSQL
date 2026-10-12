@@ -182,10 +182,6 @@ def obtener_token_api():
 
 
 def convertir_latlon_a_utm_wkt(lat, lon):
-  """Convierte latitud y longitud (WGS84) a coordenadas UTM Zona 13N (formato métrico)
-
-  y retorna una cadena en formato POINT (X Y).
-  """
   try:
     if pd.isna(lat) or pd.isna(lon):
       return None
@@ -194,7 +190,6 @@ def convertir_latlon_a_utm_wkt(lat, lon):
     if lat_f == 0.0 or lon_f == 0.0:
       return None
 
-    # Intentar usar pyproj si está disponible para máxima precisión UTM Zona 13N (EPSG:32613)
     try:
       from pyproj import Transformer
 
@@ -202,27 +197,18 @@ def convertir_latlon_a_utm_wkt(lat, lon):
       x, y = transformer.transform(lon_f, lat_f)
       return f"POINT ({x:.4f} {y:.4f})"
     except ImportError:
-      # Aproximación matemática directa para UTM Zona 13N si pyproj no está instalado
-      # WGS 84 parameters
       a = 6378137.0
       eccSquared = 0.00669438
       k0 = 0.9996
 
-      longitude = lon_f
-      latitude = lat_f
+      latRad = math.radians(lat_f)
+      lonRad = math.radians(lon_f)
 
-      latRad = math.radians(latitude)
-      lonRad = math.radians(longitude)
-
-      zoneNumber = 13  # Zona para Aguascalientes
+      zoneNumber = 13
       lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
       lonOriginRad = math.radians(lonOrigin)
 
-      e2 = (
-          eccSquared
-          / (1 - eccSquared)
-          # Simplificación de proyección transversa de Mercator para valores métricos aproximados
-      )
+      e2 = eccSquared / (1 - eccSquared)
       N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
       T = math.tan(latRad) ** 2
       C = e2 * math.cos(latRad) ** 2
@@ -278,7 +264,6 @@ def convertir_latlon_a_utm_wkt(lat, lon):
 
 @st.cache_data(ttl=300)
 def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
-  """Recorre de manera automática todas las páginas del endpoint para traer TODOS los registros y genera la columna geom."""
   token = obtener_token_api()
   if not token:
     agregar_log(
@@ -343,6 +328,9 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
   df_final = pd.concat(todos_los_registros, ignore_index=True)
 
   if not df_final.empty:
+    # Agregar columna fid a la izquierda de uuid
+    df_final.insert(0, "fid", range(1, len(df_final) + 1))
+
     if "numeroCliente" in df_final.columns:
       df_final["Cliente"] = df_final["numeroCliente"]
     elif "numero_cliente" in df_final.columns:
@@ -382,7 +370,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
-    # Identificar columnas de latitud y longitud en la respuesta de la API
     col_lat = next(
         (
             c
@@ -897,12 +884,13 @@ with tab1:
 
 with tab2:
   st.subheader(
-      "🔍 Explorador Completo de TODOS los Registros de Levantamientos (Con"
-      " geom UTM)"
+      "🔍 Explorador Completo de TODOS los Registros de Levantamientos (Con fid"
+      " y geom UTM)"
   )
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " de MIAA con su respectiva geometría UTM formateada como `POINT (X Y)`."
+      " con la columna `fid` colocada a la izquierda de `uuid`, junto con su"
+      " geometría UTM en formato `POINT (X Y)`."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -920,7 +908,8 @@ with tab2:
 
   if btn_consultar_api_lev or input_busqueda_serie == "":
     with st.spinner(
-        "Descargando, uniendo páginas y calculando geometrías UTM..."
+        "Descargando, uniendo páginas, ordenando columnas y calculando"
+        " geometrías UTM..."
     ):
       df_levantamientos_full = consultar_api_levantamientos_todos(
           busqueda=input_busqueda_serie, size_lote=200
@@ -931,8 +920,8 @@ with tab2:
       else:
         st.success(
             f"¡Se cargaron exitosamente un total de"
-            f" **{len(df_levantamientos_full):,}** registros completos con su"
-            " campo `geom`!"
+            f" **{len(df_levantamientos_full):,}** registros con las columnas"
+            " `fid` y `geom`!"
         )
         st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
 
