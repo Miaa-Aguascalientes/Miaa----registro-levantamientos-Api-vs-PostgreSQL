@@ -1,20 +1,87 @@
-from datetime import datetime
+# ==========================================
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS
+# ==========================================
+from datetime import datetime, timedelta
+import time
+from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
-from zoneinfo import ZoneInfo
+from sqlalchemy import create_engine, text
 import streamlit as st
 
 ZONA_MEXICO = ZoneInfo("America/Mexico_City")
 
 st.set_page_config(
-    page_title="Prueba Conexión API MIAA",
+    page_title="Sistema Scada - Levantamientos MIAA",
     page_icon="https://www.miaa.mx/favicon.ico",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown(
     """
     <style>
+        /* Ocultar elementos predeterminados de la interfaz de Streamlit */
+        #MainMenu {visibility: hidden;}
+        header {visibility: hidden;}
+        footer {visibility: hidden;}
+        
+        /* BLOQUEAR LA BARRA LATERAL PARA QUE NUNCA SE PUEDA OCULTAR O COLAPSAR */
+        [data-testid="stSidebar"] {
+            min-width: 280px !important;
+            max-width: 320px !important;
+            transform: none !important;
+        }
+        [data-testid="collapsedControl"] {
+            display: none !important;
+        }
+        button[kind="header"] {
+            display: none !important;
+        }
+        
+        /* EVITAR COMPLETAMENTE LA OPACIDAD O EFECTO GRIS CUANDO STREAMLIT SE EJECUTA O ACTUALIZA */
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main, .block-container {
+            opacity: 1 !important;
+            filter: none !important;
+            pointer-events: auto !important;
+        }
+        [data-testid="stStatusWidget"] {
+            display: none !important;
+        }
+        
+        /* Eliminar el espacio superior por defecto de la página */
+        .block-container {
+            padding-top: 1rem !important;
+            padding-bottom: 0rem !important;
+        }
+        
+        header hr, .stApp > header + div hr, [data-testid="stHeader"] hr, hr {
+            display: none !important;
+        }
+        
+        .metric-card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+        }
+        .metric-content {
+            display: flex;
+            flex-direction: column;
+        }
+        .metric-title {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+        .metric-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #f8fafc;
+        }
+        
+        /* Consola con altura exacta alineada */
         .terminal-box {
             background-color: #0b0f19;
             border: 1px solid #22c55e;
@@ -22,114 +89,746 @@ st.markdown(
             font-family: 'Courier New', Courier, monospace;
             padding: 15px;
             border-radius: 6px;
-            height: 350px;
+            height: 505px;
             overflow-y: scroll;
             font-size: 13px;
             line-height: 1.4;
+        }
+        
+        [data-testid="stVerticalBlock"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background-color: #0e1322 !important;
+            border: 1px solid #334155 !important;
+            border-radius: 8px !important;
+            height: 567px !important;
+            overflow-y: auto !important;
+            padding: 15px !important;
         }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
-BASE_URL = "https://prelec.miaa.mx"
-URL_LOGIN = BASE_URL + "/auth/login"
-URL_LEVANTAMIENTOS = BASE_URL + "/msvc-tecnica/medidores/levantamientos"
-
-st.markdown(
-    "### 🔌 Diagnóstico y Prueba Directa de Conexión a la API de Levantamientos"
-)
-st.markdown(
-    "Este script realiza el proceso de autenticación con tus credenciales y"
-    " ejecuta exactamente la petición GET al endpoint de levantamientos."
-)
-
-if "logs_prueba" not in st.session_state:
-  st.session_state.logs_prueba = [
-      f"[{datetime.now(ZONA_MEXICO).strftime('%H:%M:%S')}] Sistema listo para"
-      " probar conexión."
+# ==========================================
+# 2. GESTIÓN DE LOGS (CONSOLA - HORA MÉXICO)
+# ==========================================
+if "logs" not in st.session_state:
+  st.session_state.logs = [
+      f"[{datetime.now(ZONA_MEXICO).strftime('%H:%M:%S')}] Sistema inicializado"
+      " correctamente (Módulo de Levantamientos). Esperando ciclo..."
   ]
 
 
-def agregar_log_prueba(msg):
-  ts = datetime.now(ZONA_MEXICO).strftime("%H:%M:%S")
-  st.session_state.logs_prueba.insert(0, f"[{ts}] {msg}")
+def agregar_log(mensaje):
+  timestamp = datetime.now(ZONA_MEXICO).strftime("%H:%M:%S")
+  st.session_state.logs.insert(0, f"[{timestamp}] {mensaje}")
+  if len(st.session_state.logs) > 300:
+    st.session_state.logs.pop()
 
 
-col1, col2 = st.columns([1, 1])
+# ==========================================
+# 3. CONEXIONES Y CONSULTAS (SQL Y API)
+# ==========================================
+BASE_URL = "https://prelec.miaa.mx"
+URL_LOGIN_CORRECTA = "/auth/login"
+URL_LEVANTAMIENTOS = (
+    "https://prelec.miaa.mx/msvc-tecnica/medidores/levantamientos"
+)
 
-with col1:
-  if st.button("Ejecutar Prueba de Conexión", type="primary"):
-    usuario = st.secrets["api"]["usuario"]
-    password = st.secrets["api"]["password"]
 
-    agregar_log_prueba(
-        f"Intentando autenticar en {URL_LOGIN} con usuario: {usuario}"
-    )
+def obtener_motor_postgres():
+  pg = st.secrets["postgres"]
+  connection_string = f"postgresql+psycopg2://{pg['user']}:{pg['password']}@{pg['host']}:{pg['port']}/{pg['database']}"
+  return create_engine(connection_string)
 
+
+@st.cache_data(ttl=600)
+def obtener_total_registros_levantamientos_db():
+  try:
+    engine_pg = obtener_motor_postgres()
+    with engine_pg.connect() as conn:
+      result = conn.execute(
+          text('SELECT COUNT(*) FROM "Usuarios"."usuarios_miaa_conmedidor"')
+      )
+      return result.scalar()
+  except Exception as e:
+    agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
+    return 0
+
+
+@st.cache_data(ttl=300)
+def obtener_token_api():
+  usuario = st.secrets["api"]["usuario"]
+  password = st.secrets["api"]["password"]
+  url_login = BASE_URL + URL_LOGIN_CORRECTA
+
+  for _ in range(3):
     try:
       res_login = requests.post(
-          URL_LOGIN,
+          url_login,
           json={"username": usuario, "password": password},
           headers={"Content-Type": "application/json"},
           timeout=15,
       )
-
-      agregar_log_prueba(
-          f"Respuesta Login HTTP Status: {res_login.status_code}"
-      )
-
       if res_login.status_code == 200:
         data_login = res_login.json()
         token = data_login.get("token") or data_login.get("access_token")
-
         if token:
-          agregar_log_prueba("✅ Token obtenido exitosamente.")
+          return token
+      time.sleep(2)
+    except Exception:
+      time.sleep(2)
+  return None
 
-          # Parámetros exactos requeridos
-          params = [
-              ("page", 0),
-              ("size", 20),
-              ("busqueda", "222606007328"),
-              ("sort", "serie,asc"),
-              ("sort", "predio,asc"),
-          ]
 
-          agregar_log_prueba(f"Consultando GET a {URL_LEVANTAMIENTOS}...")
-          res_lev = requests.get(
-              URL_LEVANTAMIENTOS,
-              headers={
-                  "Content-Type": "application/json",
-                  "Authorization": f"Bearer {token}",
-              },
-              params=params,
-              timeout=30,
-          )
+@st.cache_data(ttl=300)
+def consultar_api_levantamientos_completa(busqueda="222606007328", size=100):
+  """Consulta el endpoint de levantamientos trayendo un lote amplio de registros con todos sus campos."""
+  token = obtener_token_api()
+  if not token:
+    agregar_log(
+        "❌ [API ERROR] No se pudo autenticar para consultar Levantamientos."
+    )
+    return pd.DataFrame()
 
-          agregar_log_prueba(
-              f"Respuesta Levantamientos HTTP Status: {res_lev.status_code}"
-          )
-          agregar_log_prueba(f"Cuerpo de respuesta: {res_lev.text}")
+  params = [
+      ("page", 0),
+      ("size", size),
+      ("busqueda", busqueda),
+      ("sort", "serie,asc"),
+      ("sort", "predio,asc"),
+  ]
 
-          if res_lev.status_code == 200:
-            st.session_state["datos_api_crudos"] = res_lev.json()
-          else:
-            st.session_state["datos_api_crudos"] = None
-        else:
-          agregar_log_prueba(
-              "❌ Error: El JSON de login no devolvió ningún token válido."
-          )
-      else:
-        agregar_log_prueba(f"❌ Error en Login: {res_lev.text if 'res_lev' in locals() else res_login.text}")
-    except Exception as e:
-      agregar_log_prueba(f"❌ Excepción crítica durante la petición: {e}")
+  try:
+    res = requests.get(
+        URL_LEVANTAMIENTOS,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        params=params,
+        timeout=30,
+    )
 
-st.markdown("#### 🖥️ Consola de Depuración")
-logs_html = "<br>".join(st.session_state.logs_prueba)
-st.markdown(
-    f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+    if res.status_code != 200:
+      agregar_log(
+          f"⚠️ [API AVISO] Levantamientos devolvió código HTTP {res.status_code}:"
+          f" {res.text[:150]}"
+      )
+      return pd.DataFrame()
+
+    data = res.json()
+    df = pd.DataFrame()
+
+    # Mapeo robusto por si la respuesta viene paginada o en lista directa
+    if isinstance(data, list):
+      df = pd.DataFrame(data)
+    elif isinstance(data, dict):
+      for key in ["content", "data", "result", "items", "levantamientos"]:
+        if key in data and isinstance(data[key], list):
+          df = pd.DataFrame(data[key])
+          break
+      if df.empty:
+        df = pd.DataFrame([data])
+
+    if not df.empty:
+      if "numeroCliente" in df.columns:
+        df["Cliente"] = df["numeroCliente"]
+      elif "numero_cliente" in df.columns:
+        df["Cliente"] = df["numero_cliente"]
+      elif "numCliente" in df.columns:
+        df["Cliente"] = df["numCliente"]
+
+      col_api_predio = next(
+          (
+              c
+              for c in ["predio", "predioViv", "predio_viv", "numeroPredio"]
+              if c in df.columns
+          ),
+          None,
+      )
+      col_api_unidad = next(
+          (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df.columns),
+          None,
+      )
+
+      def construir_predio_viv(row):
+        if not col_api_predio:
+          return ""
+        p = row[col_api_predio]
+        if pd.isna(p) or str(p).strip().lower() in ["none", "nan", ""]:
+          return ""
+        p_str = str(p).strip()
+        u = (
+            row[col_api_unidad]
+            if col_api_unidad and pd.notna(row[col_api_unidad])
+            else 0
+        )
+        u_str = str(u).strip()
+        if u_str.lower() in ["none", "nan", ""]:
+          u_str = "0"
+        return f"{p_str}-{u_str}"
+
+      df["Predio_Viv"] = df.apply(construir_predio_viv, axis=1)
+
+    return df
+  except Exception as e:
+    agregar_log(f"❌ [API EXCEPTION] Error al consultar Levantamientos: {e}")
+    return pd.DataFrame()
+
+
+# ==========================================
+# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA
+# ==========================================
+def ejecutar_sincronizacion_levantamientos(
+    barra_progreso_placeholder=None,
+    texto_estado_placeholder=None,
+    consola_placeholder=None,
+):
+  def actualizar_progreso(valor_pct, mensaje):
+    agregar_log(mensaje)
+    if consola_placeholder is not None:
+      logs_html = "<br>".join(st.session_state.logs)
+      consola_placeholder.markdown(
+          f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+      )
+    if barra_progreso_placeholder is not None:
+      barra_progreso_placeholder.progress(
+          valor_pct,
+          text=f"Progreso de ejecución: {int(valor_pct * 100)}% - {mensaje}",
+      )
+    if texto_estado_placeholder is not None:
+      texto_estado_placeholder.markdown(
+          f"🔄 **{mensaje}** ({int(valor_pct * 100)}%)"
+      )
+    time.sleep(0.05)
+
+  actualizar_progreso(
+      0.15,
+      "[PASO 1/4] Conectando con API de Levantamientos para descargar"
+      " registros...",
+  )
+  df_lev = consultar_api_levantamientos_completa(busqueda="", size=500)
+
+  if df_lev.empty:
+    actualizar_progreso(
+        1.0, "[ERROR] No se pudo obtener respuesta o datos del endpoint."
+    )
+    return False
+
+  total_descargados = len(df_lev)
+  actualizar_progreso(
+      0.35,
+      f"[PASO 2/4] API Levantamientos OK. {total_descargados:,} registros"
+      " obtenidos. Preparando tabla temporal (Staging)...",
+  )
+
+  try:
+    engine_pg = obtener_motor_postgres()
+    df_staging = df_lev.copy()
+    if "Predio_Viv" not in df_staging.columns:
+      return False
+
+    df_staging["Predio_Viv_clean"] = (
+        df_staging["Predio_Viv"].astype(str).str.strip()
+    )
+
+    actualizar_progreso(
+        0.55,
+        "[PASO 3/4] Cargando registros de Levantamientos a la tabla temporal"
+        " en PostgreSQL...",
+    )
+    df_staging.to_sql(
+        "_staging_api_levantamientos",
+        con=engine_pg,
+        schema="Usuarios",
+        if_exists="replace",
+        index=False,
+        chunksize=5000,
+    )
+
+    actualizar_progreso(
+        0.75,
+        "[PASO 4/4] Ejecutando actualización masiva desde Levantamientos en"
+        " PostgreSQL...",
+    )
+    query_update_masivo = text("""
+            UPDATE "Usuarios"."usuarios_miaa_conmedidor" AS u
+            SET 
+                "_Serie" = COALESCE(s.serie, u."_Serie"),
+                "_Colonia" = COALESCE(s.colonia, u."_Colonia"),
+                "_Domicilio" = COALESCE(s.domicilio, u."_Domicilio"),
+                "_Instalador" = COALESCE(s."usuarioNombre", u."_Instalador"),
+                "_Tipo_instalador" = CASE 
+                    WHEN TRIM(CAST(s."usuarioExterno" AS TEXT)) IN ('true', 'True', '1', 'YES', 'yes', 'S', 's', 'TRUE') THEN 'Externo'
+                    ELSE 'MIAA'
+                END,
+                "_Lectura_actual" = CASE 
+                    WHEN s."lecturaActual" IS NOT NULL AND TRIM(CAST(s."lecturaActual" AS TEXT)) NOT IN ('', 'none', 'nan', 'null') 
+                    THEN CAST(s."lecturaActual" AS DOUBLE PRECISION)
+                    ELSE u."_Lectura_actual"
+                END,
+                "_Fecha_registro" = CASE 
+                    WHEN s."fechaRegistro" IS NOT NULL AND TRIM(CAST(s."fechaRegistro" AS TEXT)) NOT IN ('', 'none', 'nan', 'null') 
+                    THEN CAST(s."fechaRegistro" AS TIMESTAMP WITH TIME ZONE)
+                    ELSE u."_Fecha_registro"
+                END,
+                "_Ultima_actualizacion" = :tiempo_actual,
+                etapa = '2'
+            FROM "Usuarios"."_staging_api_levantamientos" AS s
+            WHERE TRIM(CAST(u."Predio_Viv" AS TEXT)) = s."Predio_Viv_clean"
+              AND s."Predio_Viv_clean" NOT IN ('none', 'nan', '', 'nat', '0', 'null', 'None', 'NaN');
+        """)
+
+    with engine_pg.connect() as conn:
+      result_up = conn.execute(
+          query_update_masivo,
+          {"tiempo_actual": datetime.now(ZONA_MEXICO)},
+      )
+      conn.commit()
+      filas_actualizadas = (
+          result_up.rowcount if hasattr(result_up, "rowcount") else 0
+      )
+      conn.execute(
+          text('DROP TABLE IF EXISTS "Usuarios"."_staging_api_levantamientos"')
+      )
+      conn.commit()
+
+    actualizar_progreso(
+        1.0,
+        f"🎉 [CICLO EXITOSO] Sincronización completada. Registros actualizados:"
+        f" {filas_actualizadas:,}.",
+    )
+    return True
+  except Exception as ex:
+    actualizar_progreso(
+        1.0, f"[ERROR CRÍTICO] Falló la sincronización en DB: {ex}"
+    )
+    return False
+
+
+# ==========================================
+# 5. TEMPORIZADOR Y RELOJ (HORA MÉXICO)
+# ==========================================
+def calcular_siguiente_tiempo_reloj(minutos_intervalo):
+  ahora = datetime.now(ZONA_MEXICO)
+  minuto_actual = ahora.minute
+  segundo_actual = ahora.second
+  residuo = minuto_actual % minutos_intervalo
+  minutos_faltantes = (
+      minutos_intervalo - residuo
+      if residuo != 0
+      else (0 if segundo_actual == 0 else minutos_intervalo)
+  )
+  if minutos_faltantes == 0 and segundo_actual > 0:
+    minutos_faltantes = minutos_intervalo
+  siguiente_tiempo = (
+      ahora.replace(second=0, microsecond=0)
+      + timedelta(minutes=minutos_faltantes)
+  )
+  total_segundos_hasta_siguiente = (
+      siguiente_tiempo - ahora
+  ).total_seconds()
+  return siguiente_tiempo, int(total_segundos_hasta_siguiente)
+
+
+if "is_running" not in st.session_state:
+  st.session_state.is_running = False
+if "next_run_time" not in st.session_state:
+  st.session_state.next_run_time = None
+if "intervalo_minutos_sel" not in st.session_state:
+  st.session_state.intervalo_minutos_sel = 5
+
+# ==========================================
+# 6. CARGA DE DATOS PARA INDICADORES Y VISTAS
+# ==========================================
+total_registros_db = obtener_total_registros_levantamientos_db()
+df_lev_preview = consultar_api_levantamientos_completa(
+    busqueda="222606007328", size=20
 )
 
-if "datos_api_crudos" in st.session_state and st.session_state["datos_api_crudos"]:
-  st.markdown("#### 📊 Datos devueltos por la API (JSON parseado)")
-  st.json(st.session_state["datos_api_crudos"])
+total_serie_api_lev = 0
+if not df_lev_preview.empty:
+  if "serie" in df_lev_preview.columns:
+    ts = df_lev_preview["serie"].dropna().astype(str).str.strip()
+    total_serie_api_lev = ts[
+        ~ts.str.lower().isin(["", "none", "nan", "null"])
+    ].count()
+
+total_serie_pg_lleno = 0
+try:
+  engine_pg = obtener_motor_postgres()
+  with engine_pg.connect() as conn:
+    res_serie_pg = conn.execute(
+        text("""
+            SELECT COUNT(*) FROM "Usuarios"."usuarios_miaa_conmedidor" 
+            WHERE "_Serie" IS NOT NULL 
+              AND TRIM(CAST("_Serie" AS TEXT)) != '' 
+              AND LOWER(TRIM(CAST("_Serie" AS TEXT))) NOT IN ('none', 'nan', 'null')
+        """)
+    )
+    total_serie_pg_lleno = res_serie_pg.scalar()
+except Exception:
+  total_serie_pg_lleno = 0
+
+# ==========================================
+# 7. BARRA LATERAL IZQUIERDA (SIDEBAR)
+# ==========================================
+with st.sidebar:
+  st.image(
+      "https://raw.githubusercontent.com/Miaa-Aguascalientes/Logos/38504978c8f77a4dac38ad476f74dbdee6af2cad/LogoMIAA.svg",
+      use_container_width=True,
+  )
+  st.markdown("### 🚰 Panel Levantamientos MIAA")
+  st.markdown("---")
+  st.markdown("#### ⚙ Configuración")
+
+  opciones_intervalo = {
+      "Cada 1 minuto": 1,
+      "Cada 5 minutos": 5,
+      "Cada 10 minutos": 10,
+      "Cada 15 minutos": 15,
+      "Cada 30 minutos": 30,
+      "Cada hora": 60,
+  }
+  intervalo_sel = st.selectbox(
+      "Intervalo de sincronización", list(opciones_intervalo.keys())
+  )
+  minutos_seleccionados = opciones_intervalo[intervalo_sel]
+
+  col_s1, col_s2 = st.columns(2)
+  with col_s1:
+    btn_iniciar = st.button("INICIAR", type="primary", use_container_width=True)
+  with col_s2:
+    btn_parar = st.button("PARAR", type="secondary", use_container_width=True)
+
+  if btn_iniciar:
+    st.session_state.is_running = True
+    st.session_state.intervalo_minutos_sel = minutos_seleccionados
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(minutos_seleccionados)
+    st.session_state.next_run_time = sig_tiempo
+    agregar_log(
+        f"▶ Temporizador activado. Próxima ejecución a las"
+        f" {sig_tiempo.strftime('%H:%M:%S')}."
+    )
+    st.rerun()
+
+  if btn_parar:
+    st.session_state.is_running = False
+    st.session_state.next_run_time = None
+    agregar_log("⏹ Temporizador detenido manualmente.")
+    st.rerun()
+
+# ==========================================
+# 8. INTERFAZ PRINCIPAL
+# ==========================================
+st.markdown(
+    """
+    <div style="text-align: center; margin-top: -20px; margin-bottom: 10px;">
+        <h2 style="color: #f8fafc; font-weight: 700;">MIAA - Módulo de Levantamientos y Sincronización</h2>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+col_ind1, col_ind2, col_ind3, col_ind4 = st.columns(4)
+with col_ind1:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">🎯</div>
+            <div class="metric-content">
+                <div class="metric-title">LEVANTAMIENTOS API CON SERIE</div>
+                <div class="metric-value">{total_serie_api_lev:,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+with col_ind2:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">✅</div>
+            <div class="metric-content">
+                <div class="metric-title">POSTGRESQL (_SERIE LLENO)</div>
+                <div class="metric-value">{total_serie_pg_lleno:,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+with col_ind3:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">📊</div>
+            <div class="metric-content">
+                <div class="metric-title">TOTAL REGISTROS DB</div>
+                <div class="metric-value">{total_registros_db:,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+with col_ind4:
+  porcentaje_cobertura = (
+      min(100.0, (total_serie_pg_lleno / total_serie_api_lev) * 100)
+      if total_serie_api_lev > 0
+      else 0.0
+  )
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">📈</div>
+            <div class="metric-content">
+                <div class="metric-title">COBERTURA</div>
+                <div class="metric-value">{porcentaje_cobertura:.1f}%</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+
+st.markdown(
+    "<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True
+)
+
+st.markdown("#### 🔄 Estado y Progreso del Sistema")
+estado_ejecucion_placeholder = st.empty()
+barra_progreso_placeholder = st.empty()
+
+col_consola, col_limpieza = st.columns([1, 1], gap="medium")
+with col_consola:
+  st.markdown("#### 🖥️ Consola de Registros del Sistema")
+  consola_placeholder = st.empty()
+  logs_html = "<br>".join(st.session_state.logs)
+  consola_placeholder.markdown(
+      f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+  )
+
+if st.session_state.is_running and st.session_state.next_run_time:
+  ahora = datetime.now(ZONA_MEXICO)
+  if ahora >= st.session_state.next_run_time:
+    ejecutar_sincronizacion_levantamientos(
+        barra_progreso_placeholder,
+        estado_ejecucion_placeholder,
+        consola_placeholder,
+    )
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
+        st.session_state.intervalo_minutos_sel
+    )
+    st.session_state.next_run_time = sig_tiempo
+    st.rerun()
+  else:
+    segundos_totales_intervalo = st.session_state.intervalo_minutos_sel * 60
+    segundos_restantes = max(
+        0,
+        int(
+            (
+                st.session_state.next_run_time
+                - datetime.now(ZONA_MEXICO)
+            ).total_seconds()
+        ),
+    )
+    progreso_espera = max(
+        0.0,
+        min(
+            1.0,
+            1.0 - (segundos_restantes / float(segundos_totales_intervalo)),
+        ),
+    )
+    mins_r = segundos_restantes // 60
+    secs_r = segundos_restantes % 60
+    tiempo_formateado = f"{mins_r:02d}:{secs_r:02d}"
+
+    estado_ejecucion_placeholder.markdown(
+        f"⏳ **Temporizador activo.** Próxima ejecución a las"
+        f" **{st.session_state.next_run_time.strftime('%H:%M:%S')}** (Restan"
+        f" **{tiempo_formateado}**)"
+    )
+    barra_progreso_placeholder.progress(
+        progreso_espera,
+        text=f"Tiempo en espera — Restan {tiempo_formateado}",
+    )
+    time.sleep(1)
+    st.rerun()
+else:
+  estado_ejecucion_placeholder.markdown(
+      "⏸️ **Temporizador inactivo.** Presiona **INICIAR** en la barra lateral."
+  )
+  barra_progreso_placeholder.progress(0, text="Listo para iniciar...")
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+with col_limpieza:
+  st.markdown("#### &nbsp;")
+  with st.container(border=True):
+    st.markdown(
+        """
+            <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px; display: flex; align-items: center;">
+                🧹 <span style="margin-left: 8px;">Limpieza Masiva de Campos</span>
+            </h4>
+          """,
+        unsafe_allow_html=True,
+    )
+    campos_disponibles = [
+        "_Serie",
+        "_Colonia",
+        "_Domicilio",
+        "_Instalador",
+        "_Tipo_instalador",
+        "_Lectura_actual",
+        "_Fecha_registro",
+        "_Ultima_actualizacion",
+        "etapa",
+    ]
+    campos_a_limpiar_masivo = []
+    cols_check = st.columns(2)
+    for i, campo in enumerate(campos_disponibles):
+      with cols_check[i % 2]:
+        if st.checkbox(f"Vaciar {campo}", key=f"chk_masivo_{campo}"):
+          campos_a_limpiar_masivo.append(campo)
+
+    confirmar_masivo = st.checkbox(
+        "⚠️ Confirmo vaciar masivamente estos campos en TODA la tabla",
+        key="chk_confirmar_masivo",
+    )
+    if st.button(
+        "Ejecutar Limpieza Masiva",
+        type="primary",
+        key="btn_ejecutar_masivo",
+        use_container_width=True,
+    ):
+      if not campos_a_limpiar_masivo or not confirmar_masivo:
+        st.error(
+            "Selecciona al menos un campo y marca la casilla de confirmación."
+        )
+      else:
+        try:
+          engine_pg = obtener_motor_postgres()
+          set_sql = ", ".join(
+              [f'"{campo}" = NULL' for campo in campos_a_limpiar_masivo]
+          )
+          with engine_pg.connect() as conn_up:
+            conn_up.execute(
+                text(
+                    f'UPDATE "Usuarios"."usuarios_miaa_conmedidor" SET {set_sql}'
+                )
+            )
+            conn_up.commit()
+          st.success("¡Campos vaciados correctamente en todos los registros!")
+          st.rerun()
+        except Exception as e:
+          st.error(f"Error: {e}")
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+# ==========================================
+# 9. PESTAÑAS DE LA APLICACIÓN
+# ==========================================
+tab1, tab2 = st.tabs([
+    "🚰 Panel Principal PostgreSQL",
+    "🔍 Explorador y Todos los Campos de API Levantamientos",
+])
+
+with tab1:
+  st.markdown(
+      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Gestión"
+      ' de Tabla PostgreSQL: usuarios_miaa_conmedidor</p>',
+      unsafe_allow_html=True,
+  )
+  if total_registros_db > 0:
+    try:
+      engine_pg = obtener_motor_postgres()
+      t2_filas = 50
+      t2_total_pags = max(
+          1,
+          (total_registros_db // t2_filas)
+          + (1 if total_registros_db % t2_filas > 0 else 0),
+      )
+      t2_pag = st.selectbox(
+          "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
+      )
+      df_t2 = pd.read_sql(
+          text(
+              'SELECT * FROM "Usuarios"."usuarios_miaa_conmedidor" LIMIT :lim'
+              " OFFSET :off"
+          ),
+          con=engine_pg,
+          params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
+      )
+      st.dataframe(df_t2, use_container_width=True, height=450)
+    except Exception as e:
+      st.error(f"Error al cargar datos de PostgreSQL: {e}")
+  else:
+    st.warning("No hay datos cargados de PostgreSQL.")
+
+with tab2:
+  st.subheader(
+      "🔍 Explorador Completo de Registros y Todos los Campos de Levantamientos"
+  )
+  st.markdown(
+      "Visualiza de forma completa todos los campos y registros devueltos por"
+      " el endpoint de levantamientos de MIAA, con opción de ajustar el tamaño"
+      " del lote o buscar por serie/predio."
+  )
+
+  col_busq1, col_busq2, col_busq3 = st.columns([2, 1, 1])
+  with col_busq1:
+    input_busqueda_serie = st.text_input(
+        "Filtro de Búsqueda (Serie / Predio)",
+        value="",
+        key="input_busq_levantamientos_full",
+    )
+  with col_busq2:
+    tamanio_lote = st.selectbox(
+        "Registros a mostrar", [20, 50, 100, 200, 500], index=1
+    )
+  with col_busq3:
+    st.markdown("<br>", unsafe_allow_html=True)
+    btn_consultar_api_lev = st.button(
+        "Consultar API Completa", type="primary", use_container_width=True
+    )
+
+  if btn_consultar_api_lev or input_busqueda_serie == "":
+    with st.spinner("Consultando todos los registros de levantamientos..."):
+      df_levantamientos_full = consultar_api_levantamientos_completa(
+          busqueda=input_busqueda_serie, size=tamanio_lote
+      )
+
+      if df_levantamientos_full.empty:
+        st.warning(
+            "No se encontraron registros en el endpoint para el filtro"
+            f" especificado: `{input_busqueda_serie}`"
+        )
+      else:
+        st.success(
+            f"Se cargaron exitosamente **{len(df_levantamientos_full):,}**"
+            " registros con todos sus campos desde la API de Levantamientos."
+        )
+        st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
+
+        with st.container(border=True):
+          st.markdown(
+              "#### ⚙ Sincronización Manual Masiva de Levantamientos a"
+              " PostgreSQL"
+          )
+          st.markdown(
+              "Ejecuta el cruce masivo inmediato utilizando los datos"
+              " obtenidos de la API."
+          )
+          if st.button(
+              "Sincronizar Lote de Levantamientos a PostgreSQL",
+              key="btn_sinc_levantamientos_manual",
+              type="primary",
+          ):
+            with st.spinner("Sincronizando datos en base de datos..."):
+              exito = ejecutar_sincronizacion_levantamientos()
+              if exito:
+                st.success(
+                    "¡Sincronización masiva de levantamientos completada con"
+                    " éxito!"
+                )
+                st.rerun()
+              else:
+                st.error("Ocurrió un error durante la sincronización.")
