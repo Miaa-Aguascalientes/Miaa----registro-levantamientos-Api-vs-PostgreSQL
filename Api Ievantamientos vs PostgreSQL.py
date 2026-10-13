@@ -447,7 +447,6 @@ def ejecutar_sincronizacion_levantamientos(
       0.35,
       f"[PASO 2/3] {total_descargados:,} registros listos. Sincronizando en"
       " PostgreSQL respetando tipo geometry(POINT, 32613)...",
-      consola_placeholder,
   )
 
   try:
@@ -664,7 +663,6 @@ with col_consola:
       f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
   )
 
-# Lógica robusta del temporizador continuo en bucle
 if st.session_state.is_running and st.session_state.next_run_time:
   if st.session_state.next_run_time is None:
     sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
@@ -734,7 +732,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code> y temporizador continuo restablecido.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code>.
             </p>
         """,
         unsafe_allow_html=True,
