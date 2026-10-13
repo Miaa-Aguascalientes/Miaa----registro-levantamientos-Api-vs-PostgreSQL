@@ -405,7 +405,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA
+# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA ULTRA RÁPIDA
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -428,11 +428,11 @@ def ejecutar_sincronizacion_levantamientos(
       texto_estado_placeholder.markdown(
           f"🔄 **{mensaje}** ({int(valor_pct * 100)}%)"
       )
-    time.sleep(0.05)
+    time.sleep(0.02)
 
   actualizar_progreso(
-      0.15,
-      "[PASO 1/3] Descargando registros y calculando geometrías UTM...",
+      0.20,
+      "[PASO 1/2] Descargando registros y calculando geometrías UTM...",
   )
   df_lev = consultar_api_levantamientos_todos(size_lote=200)
 
@@ -444,20 +444,25 @@ def ejecutar_sincronizacion_levantamientos(
 
   total_descargados = len(df_lev)
   actualizar_progreso(
-      0.35,
-      f"[PASO 2/3] {total_descargados:,} registros listos. Sincronizando en"
-      " PostgreSQL respetando tipo geometry(POINT, 32613)...",
+      0.50,
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando de golpe"
+      " en PostgreSQL con geometría nativa PostGIS...",
   )
 
   try:
     engine_pg = obtener_motor_postgres()
 
+    # Extraer geometrías WKT para mapearlas directo en SQL
+    wkt_list = df_lev["geom"].tolist() if "geom" in df_lev.columns else []
     df_para_sql = df_lev.copy()
-    wkt_col = df_para_sql.pop("geom") if "geom" in df_para_sql.columns else None
+    if "geom" in df_para_sql.columns:
+      df_para_sql = df_para_sql.drop(columns=["geom"])
 
     with engine_pg.begin() as conn:
+      # Limpiar tabla manteniendo estructura y tipos intactos
       conn.execute(text('TRUNCATE TABLE "Usuarios"."levantamientos"'))
 
+    # Carga masiva rápida a través de to_sql (append)
     df_para_sql.to_sql(
         "levantamientos",
         con=engine_pg,
@@ -467,25 +472,27 @@ def ejecutar_sincronizacion_levantamientos(
         chunksize=5000,
     )
 
-    if wkt_col is not None:
-      with engine_pg.begin() as conn:
-        for idx, wkt_val in enumerate(wkt_col):
-          if wkt_val and pd.notna(wkt_val):
-            med_id = df_lev.iloc[idx].get("medidorId")
-            if med_id is not None:
-              conn.execute(
-                  text("""
-                                    UPDATE "Usuarios"."levantamientos" 
-                                    SET geom = ST_GeomFromText(:wkt, 32613) 
-                                    WHERE "medidorId" = :mid
-                                """),
-                  {"wkt": str(wkt_val), "mid": str(med_id)},
-              )
+    # Actualización masiva instantánea en una sola sentencia SQL con ST_GeomFromText
+    with engine_pg.begin() as conn:
+      conn.execute(
+          text("""
+                UPDATE "Usuarios"."levantamientos" AS l
+                SET geom = ST_GeomFromText(v.wkt, 32613)
+                FROM (
+                    SELECT unnest(:med_ids) AS mid, unnest(:wkts) AS wkt
+                ) AS v
+                WHERE l."medidorId" = v.mid AND v.wkt IS NOT NULL AND v.wkt != '';
+            """),
+          {
+              "med_ids": [str(x) for x in df_lev["medidorId"].tolist()],
+              "wkts": [str(x) if pd.notna(x) else None for x in wkt_list],
+          },
+      )
 
     actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización completada. Total guardados en"
-        f" 'Usuarios.levantamientos': {total_descargados:,}.",
+        f"🎉 [CICLO EXITOSO] Sincronización completada al 100%. Total"
+        f" guardados: {total_descargados:,}.",
     )
     return True
   except Exception as ex:
@@ -732,7 +739,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code>.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code> y actualización masiva optimizada.
             </p>
         """,
         unsafe_allow_html=True,
