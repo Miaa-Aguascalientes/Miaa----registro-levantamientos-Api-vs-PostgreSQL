@@ -703,7 +703,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL. El campo <code>_Ultima_actualizacion</code> se registra automáticamente en la base de datos pero se oculta en la interfaz.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con validación automática de números de serie duplicados.
             </p>
         """,
         unsafe_allow_html=True,
@@ -793,6 +793,50 @@ with tab2:
             f" **{len(df_levantamientos_full):,}** registros con su columna"
             " `geom`!"
         )
+
+        # ==========================================
+        # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
+        # ==========================================
+        if "serie" in df_levantamientos_full.columns:
+          series_limpias = (
+              df_levantamientos_full["serie"]
+              .dropna()
+              .astype(str)
+              .str.strip()
+          )
+          series_limpias = series_limpias[
+              ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
+          ]
+          conteo_series = series_limpias.value_counts()
+          series_duplicadas = conteo_series[conteo_series > 1]
+
+          if not series_duplicadas.empty:
+            st.error(
+                f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
+                " números de serie de medidor duplicados.**"
+            )
+            df_dup_detalle = df_levantamientos_full[
+                df_levantamientos_full["serie"]
+                .astype(str)
+                .str.strip()
+                .isin(series_duplicadas.index)
+            ].sort_values(by="serie")
+
+            with st.expander(
+                "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=True
+            ):
+              if "_Ultima_actualizacion" in df_dup_detalle.columns:
+                df_dup_vista = df_dup_detalle.drop(
+                    columns=["_Ultima_actualizacion"]
+                )
+              else:
+                df_dup_vista = df_dup_detalle
+              st.dataframe(df_dup_vista, use_container_width=True, height=250)
+          else:
+            st.success(
+                "✅ **Validación exitosa:** No existen números de serie de"
+                " medidor repetidos en los registros."
+            )
 
         if "_Ultima_actualizacion" in df_levantamientos_full.columns:
           df_vista_full = df_levantamientos_full.drop(
