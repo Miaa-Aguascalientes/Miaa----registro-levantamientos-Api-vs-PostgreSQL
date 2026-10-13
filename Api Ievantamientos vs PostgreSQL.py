@@ -147,7 +147,7 @@ def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
-      result = conn.execute(text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"'))
+      result = conn.execute(text('SELECT COUNT(*) FROM "levantamientos"'))
       return result.scalar()
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
@@ -326,7 +326,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
   df_final = pd.concat(todos_los_registros, ignore_index=True)
 
   if not df_final.empty:
-    # Construcción de Predio_Viv
     col_api_predio = next(
         (
             c
@@ -359,7 +358,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
-    # Procesamiento de Latitud, Longitud y cálculo de geom (UTM WKT)
     col_lat = next(
         (
             c
@@ -389,18 +387,20 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
       df_final["Longitud"] = None
       df_final["geom"] = None
 
-    # Mapeo de medidorId
     if "id" in df_final.columns and "medidorId" not in df_final.columns:
       df_final["medidorId"] = df_final["id"]
 
-    # Limpieza de campos redundantes
-    columnas_a_remover = ["uuid", "predio", "unidad", "usuarioId", "id"]
+    columnas_a_remover = [
+        "uuid",
+        "predio",
+        "unidad",
+        "usuarioId",
+        "id",
+        "_Ultima_actualizacion",
+    ]
     df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
 
-    # Insertar fid al inicio
     df_final.insert(0, "fid", range(1, len(df_final) + 1))
-
-    # Asignar fecha y hora del sistema en el horario del centro de México al campo _Ultima_actualizacion para la BD
     df_final["_Ultima_actualizacion"] = datetime.now(ZONA_MEXICO)
 
   return df_final
@@ -447,8 +447,8 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.35,
-      f"[PASO 2/3] {total_descargados:,} registros listos. Guardando en"
-      " 'Usuarios.levantamientos' con _Ultima_actualizacion...",
+      f"[PASO 2/3] {total_descargados:,} registros listos. Guardando en la"
+      " tabla 'levantamientos' con _Ultima_actualizacion...",
   )
 
   try:
@@ -457,7 +457,6 @@ def ejecutar_sincronizacion_levantamientos(
     df_lev.to_sql(
         "levantamientos",
         con=engine_pg,
-        schema="Usuarios",
         if_exists="replace",
         index=False,
         chunksize=5000,
@@ -466,7 +465,7 @@ def ejecutar_sincronizacion_levantamientos(
     actualizar_progreso(
         1.0,
         f"🎉 [CICLO EXITOSO] Sincronización completada. Total guardados en"
-        f" 'Usuarios.levantamientos': {total_descargados:,}.",
+        f" 'levantamientos': {total_descargados:,}.",
     )
     return True
   except Exception as ex:
@@ -700,10 +699,10 @@ with col_info:
     st.markdown(
         """
             <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px;">
-                Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
+                Gestión Exclusiva de la Tabla <code>levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema y tabla <b>Usuarios.levantamientos</b> en PostgreSQL. El campo <code>_Ultima_actualizacion</code> se registra automáticamente con la hora actual de México al sincronizar, pero se oculta de la visualización en pantalla.
+                Este programa apunta directamente a la tabla <b>levantamientos</b> en PostgreSQL. El campo <code>_Ultima_actualizacion</code> se registra automáticamente en la base de datos pero se oculta en la interfaz.
             </p>
         """,
         unsafe_allow_html=True,
@@ -715,14 +714,14 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Tabla PostgreSQL: Usuarios.levantamientos",
+    "🚰 Tabla PostgreSQL: levantamientos",
     "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
       "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
-      " almacenados en la tabla PostgreSQL: <code>Usuarios.levantamientos</code></p>",
+      " almacenados en la tabla PostgreSQL: <code>levantamientos</code></p>",
       unsafe_allow_html=True,
   )
   if total_registros_db > 0:
@@ -738,13 +737,10 @@ with tab1:
           "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
       )
       df_t2 = pd.read_sql(
-          text(
-              'SELECT * FROM "Usuarios"."levantamientos" LIMIT :lim OFFSET :off'
-          ),
+          text('SELECT * FROM "levantamientos" LIMIT :lim OFFSET :off'),
           con=engine_pg,
           params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
       )
-      # Ocultar visualmente _Ultima_actualizacion en la tabla de postgres si se desea
       if "_Ultima_actualizacion" in df_t2.columns:
         df_t2_vista = df_t2.drop(columns=["_Ultima_actualizacion"])
       else:
@@ -754,7 +750,7 @@ with tab1:
     except Exception as e:
       st.error(f"Error al cargar datos de PostgreSQL: {e}")
   else:
-    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
+    st.warning("No hay registros en la tabla `levantamientos`.")
 
 with tab2:
   st.subheader(
@@ -762,8 +758,7 @@ with tab2:
   )
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " con su geometría UTM calculada en el campo `geom` (la fecha de"
-      " actualización se guarda internamente en la base de datos)."
+      " con su geometría UTM calculada en el campo `geom`."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -796,7 +791,6 @@ with tab2:
             " `geom`!"
         )
 
-        # Ocultar visualmente _Ultima_actualizacion en la vista del explorador de la API
         if "_Ultima_actualizacion" in df_levantamientos_full.columns:
           df_vista_full = df_levantamientos_full.drop(
               columns=["_Ultima_actualizacion"]
@@ -808,16 +802,14 @@ with tab2:
 
         with st.container(border=True):
           st.markdown(
-              "#### ⚙ Sincronización Manual hacia la Tabla"
-              " `Usuarios.levantamientos`"
+              "#### ⚙ Sincronización Manual hacia la Tabla `levantamientos`"
           )
           st.markdown(
               "Ejecuta la sincronización inmediata para guardar estos datos en"
-              " tu base de datos (incluyendo la fecha de actualización del"
-              " sistema)."
+              " tu base de datos."
           )
           if st.button(
-              "Sincronizar a la Tabla 'Usuarios.levantamientos'",
+              "Sincronizar a la Tabla 'levantamientos'",
               key="btn_sinc_levantamientos_manual",
               type="primary",
           ):
