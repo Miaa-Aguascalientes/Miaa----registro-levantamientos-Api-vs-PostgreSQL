@@ -147,7 +147,7 @@ def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
-      result = conn.execute(text('SELECT COUNT(*) FROM "levantamientos"'))
+      result = conn.execute(text('SELECT COUNT(*) FROM public.levantamientos'))
       return result.scalar()
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
@@ -448,7 +448,7 @@ def ejecutar_sincronizacion_levantamientos(
   actualizar_progreso(
       0.35,
       f"[PASO 2/3] {total_descargados:,} registros listos. Guardando en la"
-      " tabla 'levantamientos' con _Ultima_actualizacion...",
+      " tabla 'public.levantamientos'...",
   )
 
   try:
@@ -457,6 +457,7 @@ def ejecutar_sincronizacion_levantamientos(
     df_lev.to_sql(
         "levantamientos",
         con=engine_pg,
+        schema="public",
         if_exists="replace",
         index=False,
         chunksize=5000,
@@ -465,7 +466,7 @@ def ejecutar_sincronizacion_levantamientos(
     actualizar_progreso(
         1.0,
         f"🎉 [CICLO EXITOSO] Sincronización completada. Total guardados en"
-        f" 'levantamientos': {total_descargados:,}.",
+        f" 'public.levantamientos': {total_descargados:,}.",
     )
     return True
   except Exception as ex:
@@ -702,7 +703,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente a la tabla <b>levantamientos</b> en PostgreSQL. El campo <code>_Ultima_actualizacion</code> se registra automáticamente en la base de datos pero se oculta en la interfaz.
+                Este programa apunta directamente al esquema público y la tabla <b>levantamientos</b> en PostgreSQL. El campo <code>_Ultima_actualizacion</code> se registra automáticamente en la base de datos pero se oculta en la interfaz.
             </p>
         """,
         unsafe_allow_html=True,
@@ -737,7 +738,9 @@ with tab1:
           "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
       )
       df_t2 = pd.read_sql(
-          text('SELECT * FROM "levantamientos" LIMIT :lim OFFSET :off'),
+          text(
+              "SELECT * FROM public.levantamientos LIMIT :lim OFFSET :off"
+          ),
           con=engine_pg,
           params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
       )
