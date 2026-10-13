@@ -328,9 +328,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
   df_final = pd.concat(todos_los_registros, ignore_index=True)
 
   if not df_final.empty:
-    # Agregar columna fid a la izquierda de uuid
-    df_final.insert(0, "fid", range(1, len(df_final) + 1))
-
     if "numeroCliente" in df_final.columns:
       df_final["Cliente"] = df_final["numeroCliente"]
     elif "numero_cliente" in df_final.columns:
@@ -369,6 +366,13 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
       return f"{p_str}-{u_str}"
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
+
+    # Eliminar campos solicitados: uuid, predio, unidad, usuarioId
+    columnas_a_remover = ["uuid", "predio", "unidad", "usuarioId"]
+    df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
+
+    # Insertar la columna fid al inicio (posición 0)
+    df_final.insert(0, "fid", range(1, len(df_final) + 1))
 
     col_lat = next(
         (
@@ -889,8 +893,8 @@ with tab2:
   )
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " con la columna `fid` colocada a la izquierda de `uuid`, junto con su"
-      " geometría UTM en formato `POINT (X Y)`."
+      " sin campos redundantes (`uuid`, `predio`, `unidad`, `usuarioId`), con la"
+      " columna `fid` al inicio y el campo `geom` en formato `POINT (X Y)`."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -908,8 +912,7 @@ with tab2:
 
   if btn_consultar_api_lev or input_busqueda_serie == "":
     with st.spinner(
-        "Descargando, uniendo páginas, ordenando columnas y calculando"
-        " geometrías UTM..."
+        "Descargando, filtrando campos y calculando geometrías UTM..."
     ):
       df_levantamientos_full = consultar_api_levantamientos_todos(
           busqueda=input_busqueda_serie, size_lote=200
@@ -920,8 +923,8 @@ with tab2:
       else:
         st.success(
             f"¡Se cargaron exitosamente un total de"
-            f" **{len(df_levantamientos_full):,}** registros con las columnas"
-            " `fid` y `geom`!"
+            f" **{len(df_levantamientos_full):,}** registros limpios y con"
+            " su columna `fid`!"
         )
         st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
 
