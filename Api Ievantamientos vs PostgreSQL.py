@@ -405,7 +405,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA ULTRA RÁPIDA
+# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA INSTÁNTANEA
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -421,18 +421,15 @@ def ejecutar_sincronizacion_levantamientos(
       )
     if barra_progreso_placeholder is not None:
       barra_progreso_placeholder.progress(
-          valor_pct,
-          text=f"Progreso de ejecución: {int(valor_pct * 100)}% - {mensaje}",
+          valor_pct, text=f"Sincronizando: {int(valor_pct * 100)}% - {mensaje}"
       )
     if texto_estado_placeholder is not None:
       texto_estado_placeholder.markdown(
           f"🔄 **{mensaje}** ({int(valor_pct * 100)}%)"
       )
-    time.sleep(0.02)
 
   actualizar_progreso(
-      0.20,
-      "[PASO 1/2] Descargando registros y calculando geometrías UTM...",
+      0.30, "[PASO 1/2] Descargando registros de la API y calculando UTM..."
   )
   df_lev = consultar_api_levantamientos_todos(size_lote=200)
 
@@ -444,26 +441,21 @@ def ejecutar_sincronizacion_levantamientos(
 
   total_descargados = len(df_lev)
   actualizar_progreso(
-      0.50,
-      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando de golpe"
-      " en PostgreSQL con geometría nativa PostGIS...",
+      0.60,
+      f"[PASO 2/2] {total_descargados:,} registros listos. Guardando de golpe"
+      " en PostgreSQL...",
   )
 
   try:
     engine_pg = obtener_motor_postgres()
 
-    # Extraer geometrías WKT para mapearlas directo en SQL
-    wkt_list = df_lev["geom"].tolist() if "geom" in df_lev.columns else []
-    df_para_sql = df_lev.copy()
-    if "geom" in df_para_sql.columns:
-      df_para_sql = df_para_sql.drop(columns=["geom"])
-
     with engine_pg.begin() as conn:
-      # Limpiar tabla manteniendo estructura y tipos intactos
+      # Limpiar tabla respetando su estructura y tipo geometry(POINT, 32613)
       conn.execute(text('TRUNCATE TABLE "Usuarios"."levantamientos"'))
 
-    # Carga masiva rápida a través de to_sql (append)
-    df_para_sql.to_sql(
+    # Inserción masiva directa y ultra rápida a través de to_sql.
+    # PostGIS interpreta automáticamente el formato WKT de la columna 'geom' como geometría espacial nativa.
+    df_lev.to_sql(
         "levantamientos",
         con=engine_pg,
         schema="Usuarios",
@@ -472,27 +464,10 @@ def ejecutar_sincronizacion_levantamientos(
         chunksize=5000,
     )
 
-    # Actualización masiva instantánea en una sola sentencia SQL con ST_GeomFromText
-    with engine_pg.begin() as conn:
-      conn.execute(
-          text("""
-                UPDATE "Usuarios"."levantamientos" AS l
-                SET geom = ST_GeomFromText(v.wkt, 32613)
-                FROM (
-                    SELECT unnest(:med_ids) AS mid, unnest(:wkts) AS wkt
-                ) AS v
-                WHERE l."medidorId" = v.mid AND v.wkt IS NOT NULL AND v.wkt != '';
-            """),
-          {
-              "med_ids": [str(x) for x in df_lev["medidorId"].tolist()],
-              "wkts": [str(x) if pd.notna(x) else None for x in wkt_list],
-          },
-      )
-
     actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización completada al 100%. Total"
-        f" guardados: {total_descargados:,}.",
+        f"🎉 [CICLO EXITOSO] Sincronización instantánea completada."
+        f" {total_descargados:,} registros guardados.",
     )
     return True
   except Exception as ex:
@@ -739,7 +714,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code> y actualización masiva optimizada.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code> y carga ultra rápida sin demoras.
             </p>
         """,
         unsafe_allow_html=True,
@@ -785,116 +760,4 @@ with tab1:
       else:
         df_t2_vista = df_t2
 
-      st.dataframe(df_t2_vista, use_container_width=True, height=450)
-    except Exception as e:
-      st.error(f"Error al cargar datos de PostgreSQL: {e}")
-  else:
-    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
-
-with tab2:
-  st.subheader(
-      "🔍 Explorador Completo de TODOS los Registros (Con geom UTM y fid)"
-  )
-  st.markdown(
-      "Visualiza absolutamente todos los registros existentes en el servidor"
-      " con su geometría UTM calculada en el campo `geom`."
-  )
-
-  input_busqueda_serie = st.text_input(
-      "Buscar número de serie de medidor (Filtro en tiempo real)",
-      value="",
-      key="input_busq_levantamientos_full",
-  )
-
-  df_levantamientos_full = consultar_api_levantamientos_todos(size_lote=200)
-
-  if df_levantamientos_full.empty:
-    st.warning("No se encontraron registros en el endpoint.")
-  else:
-    if input_busqueda_serie.strip() != "":
-      termino = input_busqueda_serie.strip().lower()
-      if "serie" in df_levantamientos_full.columns:
-        df_levantamientos_full = df_levantamientos_full[
-            df_levantamientos_full["serie"]
-            .astype(str)
-            .str.lower()
-            .str.contains(termino, na=False)
-        ]
-
-    st.success(
-        f"¡Se cargaron y filtraron un total de"
-        f" **{len(df_levantamientos_full):,}** registros con su columna"
-        " `geom`!"
-    )
-
-    # ==========================================
-    # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
-    # ==========================================
-    if "serie" in df_levantamientos_full.columns:
-      series_limpias = (
-          df_levantamientos_full["serie"].dropna().astype(str).str.strip()
-      )
-      series_limpias = series_limpias[
-          ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
-      ]
-      conteo_series = series_limpias.value_counts()
-      series_duplicadas = conteo_series[conteo_series > 1]
-
-      if not series_duplicadas.empty:
-        st.error(
-            f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
-            " números de serie de medidor duplicados.**"
-        )
-        df_dup_detalle = df_levantamientos_full[
-            df_levantamientos_full["serie"]
-            .astype(str)
-            .str.strip()
-            .isin(series_duplicadas.index)
-        ].sort_values(by="serie")
-
-        with st.expander(
-            "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=False
-        ):
-          if "_Ultima_actualizacion" in df_dup_detalle.columns:
-            df_dup_vista = df_dup_detalle.drop(
-                columns=["_Ultima_actualizacion"]
-            )
-          else:
-            df_dup_vista = df_dup_detalle
-          st.dataframe(df_dup_vista, use_container_width=True, height=250)
-      else:
-        st.success(
-            "✅ **Validación exitosa:** No existen números de serie de medidor"
-            " repetidos en los registros mostrados."
-        )
-
-    if "_Ultima_actualizacion" in df_levantamientos_full.columns:
-      df_vista_full = df_levantamientos_full.drop(
-          columns=["_Ultima_actualizacion"]
-      )
-    else:
-      df_vista_full = df_levantamientos_full
-
-    st.dataframe(df_vista_full, use_container_width=True, height=500)
-
-    with st.container(border=True):
-      st.markdown(
-          "#### ⚙ Sincronización Manual hacia la Tabla"
-          " `Usuarios.levantamientos`"
-      )
-      st.markdown(
-          "Ejecuta la sincronización inmediata para guardar estos datos en"
-          " tu base de datos."
-      )
-      if st.button(
-          "Sincronizar a la Tabla 'Usuarios.levantamientos'",
-          key="btn_sinc_levantamientos_manual",
-          type="primary",
-      ):
-        with st.spinner("Sincronizando datos en base de datos..."):
-          exito = ejecutar_sincronizacion_levantamientos()
-          if exito:
-            st.success("¡Sincronización completada con éxito!")
-            st.rerun()
-          else:
-            st.error("Ocurrió un error durante la sincronización.")
+      st.dataframe(df_t2_vista, use_container_width
