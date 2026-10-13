@@ -147,9 +147,7 @@ def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
-      result = conn.execute(
-          text('SELECT COUNT(*) FROM "Usuarios"."usuarios_miaa_conmedidor"')
-      )
+      result = conn.execute(text('SELECT COUNT(*) FROM "levantamientos"'))
       return result.scalar()
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
@@ -328,13 +326,7 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
   df_final = pd.concat(todos_los_registros, ignore_index=True)
 
   if not df_final.empty:
-    if "numeroCliente" in df_final.columns:
-      df_final["Cliente"] = df_final["numeroCliente"]
-    elif "numero_cliente" in df_final.columns:
-      df_final["Cliente"] = df_final["numero_cliente"]
-    elif "numCliente" in df_final.columns:
-      df_final["Cliente"] = df_final["numCliente"]
-
+    # Mapeo y construcción de Predio_Viv
     col_api_predio = next(
         (
             c
@@ -367,17 +359,11 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
-    # Eliminar campos solicitados: uuid, predio, unidad, usuarioId
-    columnas_a_remover = ["uuid", "predio", "unidad", "usuarioId"]
-    df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
-
-    # Insertar la columna fid al inicio (posición 0)
-    df_final.insert(0, "fid", range(1, len(df_final) + 1))
-
+    # Coordenadas Latitud y Longitud
     col_lat = next(
         (
             c
-            for c in ["latitud", "lat", "latitude", "y"]
+            for c in ["latitud", "lat", "latitude", "y", "Latitud"]
             if c in df_final.columns
         ),
         None,
@@ -385,18 +371,35 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
     col_lon = next(
         (
             c
-            for c in ["longitud", "lon", "lng", "longitude", "x"]
+            for c in ["longitud", "lon", "lng", "longitude", "x", "Longitud"]
             if c in df_final.columns
         ),
         None,
     )
 
     if col_lat and col_lon:
+      df_final["Latitud"] = pd.to_numeric(df_final[col_lat], errors="coerce")
+      df_final["Longitud"] = pd.to_numeric(df_final[col_lon], errors="coerce")
       df_final["geom"] = df_final.apply(
-          lambda r: convertir_latlon_a_utm_wkt(r[col_lat], r[col_lon]), axis=1
+          lambda r: convertir_latlon_a_utm_wkt(r["Latitud"], r["Longitud"]),
+          axis=1,
       )
     else:
+      df_final["Latitud"] = None
+      df_final["Longitud"] = None
       df_final["geom"] = None
+
+    # Mapeo de nombres exactos requeridos por la tabla
+    if "id" in df_final.columns and "medidorId" not in df_final.columns:
+      df_final["medidorId"] = df_final["id"]
+
+    # Eliminar campos redundantes o no deseados
+    columnas_a_remover = ["uuid", "predio", "unidad", "usuarioId", "id"]
+    df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
+
+    # Insertar fid al inicio (posición 0)
+    df_final.insert(0, "fid", range(1, len(df_final) + 1))
+    df_final["_Ultima_actualizacion"] = datetime.now(ZONA_MEXICO)
 
   return df_final
 
@@ -429,8 +432,8 @@ def ejecutar_sincronizacion_levantamientos(
 
   actualizar_progreso(
       0.15,
-      "[PASO 1/4] Descargando TODOS los registros y calculando geometrías"
-      " UTM...",
+      "[PASO 1/3] Descargando TODOS los registros de Levantamientos de la"
+      " API...",
   )
   df_lev = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
 
@@ -443,90 +446,31 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.35,
-      f"[PASO 2/4] {total_descargados:,} registros obtenidos con geom. Preparando"
-      " staging...",
+      f"[PASO 2/3] {total_descargados:,} registros obtenidos con éxito."
+      " Actualizando tabla 'levantamientos' en PostgreSQL...",
   )
 
   try:
     engine_pg = obtener_motor_postgres()
-    df_staging = df_lev.copy()
-    if "Predio_Viv" not in df_staging.columns:
-      return False
 
-    df_staging["Predio_Viv_clean"] = (
-        df_staging["Predio_Viv"].astype(str).str.strip()
-    )
-
-    actualizar_progreso(
-        0.55,
-        "[PASO 3/4] Cargando registros y geometrías a la tabla temporal en"
-        " PostgreSQL...",
-    )
-    df_staging.to_sql(
-        "_staging_api_levantamientos",
+    # Reemplazo masivo o inserción directa en la tabla 'levantamientos'
+    df_lev.to_sql(
+        "levantamientos",
         con=engine_pg,
-        schema="Usuarios",
         if_exists="replace",
         index=False,
         chunksize=5000,
     )
 
     actualizar_progreso(
-        0.75,
-        "[PASO 4/4] Ejecutando actualización masiva (incluyendo geom) en"
-        " PostgreSQL...",
-    )
-    query_update_masivo = text("""
-            UPDATE "Usuarios"."usuarios_miaa_conmedidor" AS u
-            SET 
-                "_Serie" = COALESCE(s.serie, u."_Serie"),
-                "_Colonia" = COALESCE(s.colonia, u."_Colonia"),
-                "_Domicilio" = COALESCE(s.domicilio, u."_Domicilio"),
-                "_Instalador" = COALESCE(s."usuarioNombre", u."_Instalador"),
-                "_Tipo_instalador" = CASE 
-                    WHEN TRIM(CAST(s."usuarioExterno" AS TEXT)) IN ('true', 'True', '1', 'YES', 'yes', 'S', 's', 'TRUE') THEN 'Externo'
-                    ELSE 'MIAA'
-                END,
-                "_Lectura_actual" = CASE 
-                    WHEN s."lecturaActual" IS NOT NULL AND TRIM(CAST(s."lecturaActual" AS TEXT)) NOT IN ('', 'none', 'nan', 'null') 
-                    THEN CAST(s."lecturaActual" AS DOUBLE PRECISION)
-                    ELSE u."_Lectura_actual"
-                END,
-                "_Fecha_registro" = CASE 
-                    WHEN s."fechaRegistro" IS NOT NULL AND TRIM(CAST(s."fechaRegistro" AS TEXT)) NOT IN ('', 'none', 'nan', 'null') 
-                    THEN CAST(s."fechaRegistro" AS TIMESTAMP WITH TIME ZONE)
-                    ELSE u."_Fecha_registro"
-                END,
-                "_Ultima_actualizacion" = :tiempo_actual,
-                etapa = '2'
-            FROM "Usuarios"."_staging_api_levantamientos" AS s
-            WHERE TRIM(CAST(u."Predio_Viv" AS TEXT)) = s."Predio_Viv_clean"
-              AND s."Predio_Viv_clean" NOT IN ('none', 'nan', '', 'nat', '0', 'null', 'None', 'NaN');
-        """)
-
-    with engine_pg.connect() as conn:
-      result_up = conn.execute(
-          query_update_masivo,
-          {"tiempo_actual": datetime.now(ZONA_MEXICO)},
-      )
-      conn.commit()
-      filas_actualizadas = (
-          result_up.rowcount if hasattr(result_up, "rowcount") else 0
-      )
-      conn.execute(
-          text('DROP TABLE IF EXISTS "Usuarios"."_staging_api_levantamientos"')
-      )
-      conn.commit()
-
-    actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización completada. Registros actualizados:"
-        f" {filas_actualizadas:,}.",
+        f"🎉 [CICLO EXITOSO] Sincronización completada. Total de registros"
+        f" guardados en 'levantamientos': {total_descargados:,}.",
     )
     return True
   except Exception as ex:
     actualizar_progreso(
-        1.0, f"[ERROR CRÍTICO] Falló la sincronización en DB: {ex}"
+        1.0, f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
     )
     return False
 
@@ -576,22 +520,6 @@ if not df_lev_preview.empty:
     total_serie_api_lev = ts[
         ~ts.str.lower().isin(["", "none", "nan", "null"])
     ].count()
-
-total_serie_pg_lleno = 0
-try:
-  engine_pg = obtener_motor_postgres()
-  with engine_pg.connect() as conn:
-    res_serie_pg = conn.execute(
-        text("""
-            SELECT COUNT(*) FROM "Usuarios"."usuarios_miaa_conmedidor" 
-            WHERE "_Serie" IS NOT NULL 
-              AND TRIM(CAST("_Serie" AS TEXT)) != '' 
-              AND LOWER(TRIM(CAST("_Serie" AS TEXT))) NOT IN ('none', 'nan', 'null')
-        """)
-    )
-    total_serie_pg_lleno = res_serie_pg.scalar()
-except Exception:
-  total_serie_pg_lleno = 0
 
 # ==========================================
 # 7. BARRA LATERAL IZQUIERDA (SIDEBAR)
@@ -653,7 +581,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-col_ind1, col_ind2, col_ind3, col_ind4 = st.columns(4)
+col_ind1, col_ind2, col_ind3 = st.columns(3)
 with col_ind1:
   st.markdown(
       f"""
@@ -671,10 +599,10 @@ with col_ind2:
   st.markdown(
       f"""
         <div class="metric-card">
-            <div style="font-size: 28px; margin-right: 15px;">✅</div>
+            <div style="font-size: 28px; margin-right: 15px;">📊</div>
             <div class="metric-content">
-                <div class="metric-title">POSTGRESQL (_SERIE LLENO)</div>
-                <div class="metric-value">{total_serie_pg_lleno:,}</div>
+                <div class="metric-title">TOTAL REGISTROS TABLA LEVANTAMIENTOS (DB)</div>
+                <div class="metric-value">{total_registros_db:,}</div>
             </div>
         </div>
     """,
@@ -684,28 +612,10 @@ with col_ind3:
   st.markdown(
       f"""
         <div class="metric-card">
-            <div style="font-size: 28px; margin-right: 15px;">📊</div>
+            <div style="font-size: 28px; margin-right: 15px;">✅</div>
             <div class="metric-content">
-                <div class="metric-title">TOTAL REGISTROS DB</div>
-                <div class="metric-value">{total_registros_db:,}</div>
-            </div>
-        </div>
-    """,
-      unsafe_allow_html=True,
-  )
-with col_ind4:
-  porcentaje_cobertura = (
-      min(100.0, (total_serie_pg_lleno / len(df_lev_preview)) * 100)
-      if len(df_lev_preview) > 0
-      else 0.0
-  )
-  st.markdown(
-      f"""
-        <div class="metric-card">
-            <div style="font-size: 28px; margin-right: 15px;">📈</div>
-            <div class="metric-content">
-                <div class="metric-title">COBERTURA</div>
-                <div class="metric-value">{porcentaje_cobertura:.1f}%</div>
+                <div class="metric-title">SERIES VÁLIDAS EN API</div>
+                <div class="metric-value">{total_serie_api_lev:,}</div>
             </div>
         </div>
     """,
@@ -720,9 +630,9 @@ st.markdown("#### 🔄 Estado y Progreso del Sistema")
 estado_ejecucion_placeholder = st.empty()
 barra_progreso_placeholder = st.empty()
 
-col_consola, col_limpieza = st.columns([1, 1], gap="medium")
+col_consola, col_info = st.columns([1, 1], gap="medium")
 with col_consola:
-  st.markdown("#### 🖥️ Consola de Registros del Sistema")
+  st.markdown("#### 🖥️ Consola de Registros (Tabla Levantamientos)")
   consola_placeholder = st.empty()
   logs_html = "<br>".join(st.session_state.logs)
   consola_placeholder.markdown(
@@ -783,66 +693,20 @@ else:
 
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 
-with col_limpieza:
-  st.markdown("#### &nbsp;")
+with col_info:
+  st.markdown("#### ℹ️ Información del Módulo")
   with st.container(border=True):
     st.markdown(
         """
-            <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px; display: flex; align-items: center;">
-                🧹 <span style="margin-left: 8px;">Limpieza Masiva de Campos</span>
+            <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px;">
+                Gestión Exclusiva de la Tabla <code>levantamientos</code>
             </h4>
-          """,
+            <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
+                Este programa ahora apunta directamente a la tabla <b>levantamientos</b> en PostgreSQL. La sincronización automática descarga todos los registros de la API con sus geometrías <code>geom</code>, <code>fid</code> y campos normalizados.
+            </p>
+        """,
         unsafe_allow_html=True,
     )
-    campos_disponibles = [
-        "_Serie",
-        "_Colonia",
-        "_Domicilio",
-        "_Instalador",
-        "_Tipo_instalador",
-        "_Lectura_actual",
-        "_Fecha_registro",
-        "_Ultima_actualizacion",
-        "etapa",
-    ]
-    campos_a_limpiar_masivo = []
-    cols_check = st.columns(2)
-    for i, campo in enumerate(campos_disponibles):
-      with cols_check[i % 2]:
-        if st.checkbox(f"Vaciar {campo}", key=f"chk_masivo_{campo}"):
-          campos_a_limpiar_masivo.append(campo)
-
-    confirmar_masivo = st.checkbox(
-        "⚠️ Confirmo vaciar masivamente estos campos en TODA la tabla",
-        key="chk_confirmar_masivo",
-    )
-    if st.button(
-        "Ejecutar Limpieza Masiva",
-        type="primary",
-        key="btn_ejecutar_masivo",
-        use_container_width=True,
-    ):
-      if not campos_a_limpiar_masivo or not confirmar_masivo:
-        st.error(
-            "Selecciona al menos un campo y marca la casilla de confirmación."
-        )
-      else:
-        try:
-          engine_pg = obtener_motor_postgres()
-          set_sql = ", ".join(
-              [f'"{campo}" = NULL' for campo in campos_a_limpiar_masivo]
-          )
-          with engine_pg.connect() as conn_up:
-            conn_up.execute(
-                text(
-                    f'UPDATE "Usuarios"."usuarios_miaa_conmedidor" SET {set_sql}'
-                )
-            )
-            conn_up.commit()
-          st.success("¡Campos vaciados correctamente en todos los registros!")
-          st.rerun()
-        except Exception as e:
-          st.error(f"Error: {e}")
 
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 
@@ -850,14 +714,14 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Panel Principal PostgreSQL",
-    "🔍 Explorador y Todos los Registros de API Levantamientos",
+    "🚰 Tabla PostgreSQL: levantamientos",
+    "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
-      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Gestión"
-      ' de Tabla PostgreSQL: usuarios_miaa_conmedidor</p>',
+      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
+      " almacenados en la tabla PostgreSQL: <code>levantamientos</code></p>",
       unsafe_allow_html=True,
   )
   if total_registros_db > 0:
@@ -873,10 +737,7 @@ with tab1:
           "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
       )
       df_t2 = pd.read_sql(
-          text(
-              'SELECT * FROM "Usuarios"."usuarios_miaa_conmedidor" LIMIT :lim'
-              " OFFSET :off"
-          ),
+          text('SELECT * FROM "levantamientos" LIMIT :lim OFFSET :off'),
           con=engine_pg,
           params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
       )
@@ -884,17 +745,14 @@ with tab1:
     except Exception as e:
       st.error(f"Error al cargar datos de PostgreSQL: {e}")
   else:
-    st.warning("No hay datos cargados de PostgreSQL.")
+    st.warning("No hay registros en la tabla `levantamientos`.")
 
 with tab2:
-  st.subheader(
-      "🔍 Explorador Completo de TODOS los Registros de Levantamientos (Con fid"
-      " y geom UTM)"
-  )
+  st.subheader("🔍 Explorador Completo de TODOS los Registros de Levantamientos")
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " sin campos redundantes (`uuid`, `predio`, `unidad`, `usuarioId`), con la"
-      " columna `fid` al inicio y el campo `geom` en formato `POINT (X Y)`."
+      " con su estructura optimizada (`fid`, `medidorId`, `Predio_Viv`, `geom`,"
+      " etc.)."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -911,9 +769,7 @@ with tab2:
     )
 
   if btn_consultar_api_lev or input_busqueda_serie == "":
-    with st.spinner(
-        "Descargando, filtrando campos y calculando geometrías UTM..."
-    ):
+    with st.spinner("Descargando y procesando todos los registros de la API..."):
       df_levantamientos_full = consultar_api_levantamientos_todos(
           busqueda=input_busqueda_serie, size_lote=200
       )
@@ -923,28 +779,28 @@ with tab2:
       else:
         st.success(
             f"¡Se cargaron exitosamente un total de"
-            f" **{len(df_levantamientos_full):,}** registros limpios y con"
-            " su columna `fid`!"
+            f" **{len(df_levantamientos_full):,}** registros limpios desde la"
+            " API!"
         )
         st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
 
         with st.container(border=True):
-          st.markdown("#### ⚙ Sincronización Masiva a PostgreSQL")
           st.markdown(
-              "Ejecuta el cruce masivo inmediato utilizando todo el universo de"
-              " registros descargados."
+              "#### ⚙ Sincronización Manual hacia la Tabla `levantamientos`"
+          )
+          st.markdown(
+              "Ejecuta la sincronización inmediata para guardar estos datos en"
+              " tu base de datos."
           )
           if st.button(
-              "Sincronizar Todos los Registros a PostgreSQL",
+              "Sincronizar a la Tabla 'levantamientos'",
               key="btn_sinc_levantamientos_manual",
               type="primary",
           ):
             with st.spinner("Sincronizando datos en base de datos..."):
               exito = ejecutar_sincronizacion_levantamientos()
               if exito:
-                st.success(
-                    "¡Sincronización masiva completada con éxito!"
-                )
+                st.success("¡Sincronización completada con éxito!")
                 st.rerun()
               else:
                 st.error("Ocurrió un error durante la sincronización.")
