@@ -261,7 +261,7 @@ def convertir_latlon_a_utm_wkt(lat, lon):
 
 
 @st.cache_data(ttl=300)
-def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
+def consultar_api_levantamientos_todos(size_lote=200):
   token = obtener_token_api()
   if not token:
     agregar_log(
@@ -277,7 +277,6 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
     params = [
         ("page", page),
         ("size", size_lote),
-        ("busqueda", busqueda),
         ("sort", "serie,asc"),
         ("sort", "predio,asc"),
     ]
@@ -436,7 +435,7 @@ def ejecutar_sincronizacion_levantamientos(
       0.15,
       "[PASO 1/3] Descargando registros y calculando geometrías geom (UTM)...",
   )
-  df_lev = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
+  df_lev = consultar_api_levantamientos_todos(size_lote=200)
 
   if df_lev.empty:
     actualizar_progreso(
@@ -512,7 +511,7 @@ if "intervalo_minutos_sel" not in st.session_state:
 # 6. CARGA DE DATOS PARA INDICADORES Y VISTAS
 # ==========================================
 total_registros_db = obtener_total_registros_levantamientos_db()
-df_lev_preview = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
+df_lev_preview = consultar_api_levantamientos_todos(size_lote=200)
 
 total_serie_api_lev = 0
 if not df_lev_preview.empty:
@@ -703,7 +702,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con validación automática de números de serie duplicados.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con búsqueda instantánea y validación de duplicados.
             </p>
         """,
         unsafe_allow_html=True,
@@ -764,107 +763,105 @@ with tab2:
       " con su geometría UTM calculada en el campo `geom`."
   )
 
-  col_busq1, col_busq2 = st.columns([3, 1])
-  with col_busq1:
-    input_busqueda_serie = st.text_input(
-        "Filtro opcional (Dejar vacío para ver TODOS)",
-        value="",
-        key="input_busq_levantamientos_full",
-    )
-  with col_busq2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    btn_consultar_api_lev = st.button(
-        "Cargar Todos los Registros", type="primary", use_container_width=True
-    )
+  input_busqueda_serie = st.text_input(
+      "Buscar número de serie de medidor (Filtro en tiempo real)",
+      value="",
+      key="input_busq_levantamientos_full",
+  )
 
-  if btn_consultar_api_lev or input_busqueda_serie == "":
-    with st.spinner(
-        "Descargando registros y calculando geometrías UTM (geom)..."
-    ):
-      df_levantamientos_full = consultar_api_levantamientos_todos(
-          busqueda=input_busqueda_serie, size_lote=200
+  with st.spinner(
+      "Descargando registros y calculando geometrías UTM (geom)..."
+  ):
+    df_levantamientos_full = consultar_api_levantamientos_todos(size_lote=200)
+
+    if df_levantamientos_full.empty:
+      st.warning("No se encontraron registros en el endpoint.")
+    else:
+      # Filtrado en tiempo real por número de serie
+      if input_busqueda_serie.strip() != "":
+        termino = input_busqueda_serie.strip().lower()
+        if "serie" in df_levantamientos_full.columns:
+          df_levantamientos_full = df_levantamientos_full[
+              df_levantamientos_full["serie"]
+              .astype(str)
+              .str.lower()
+              .str.contains(termino, na=False)
+          ]
+
+      st.success(
+          f"¡Se cargaron y filtraron un total de"
+          f" **{len(df_levantamientos_full):,}** registros con su columna"
+          " `geom`!"
       )
 
-      if df_levantamientos_full.empty:
-        st.warning("No se encontraron registros en el endpoint.")
-      else:
-        st.success(
-            f"¡Se cargaron exitosamente un total de"
-            f" **{len(df_levantamientos_full):,}** registros con su columna"
-            " `geom`!"
+      # ==========================================
+      # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
+      # ==========================================
+      if "serie" in df_levantamientos_full.columns:
+        series_limpias = (
+            df_levantamientos_full["serie"].dropna().astype(str).str.strip()
         )
+        series_limpias = series_limpias[
+            ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
+        ]
+        conteo_series = series_limpias.value_counts()
+        series_duplicadas = conteo_series[conteo_series > 1]
 
-        # ==========================================
-        # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
-        # ==========================================
-        if "serie" in df_levantamientos_full.columns:
-          series_limpias = (
+        if not series_duplicadas.empty:
+          st.error(
+              f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
+              " números de serie de medidor duplicados.**"
+          )
+          df_dup_detalle = df_levantamientos_full[
               df_levantamientos_full["serie"]
-              .dropna()
               .astype(str)
               .str.strip()
-          )
-          series_limpias = series_limpias[
-              ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
-          ]
-          conteo_series = series_limpias.value_counts()
-          series_duplicadas = conteo_series[conteo_series > 1]
+              .isin(series_duplicadas.index)
+          ].sort_values(by="serie")
 
-          if not series_duplicadas.empty:
-            st.error(
-                f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
-                " números de serie de medidor duplicados.**"
-            )
-            df_dup_detalle = df_levantamientos_full[
-                df_levantamientos_full["serie"]
-                .astype(str)
-                .str.strip()
-                .isin(series_duplicadas.index)
-            ].sort_values(by="serie")
-
-            with st.expander(
-                "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=True
-            ):
-              if "_Ultima_actualizacion" in df_dup_detalle.columns:
-                df_dup_vista = df_dup_detalle.drop(
-                    columns=["_Ultima_actualizacion"]
-                )
-              else:
-                df_dup_vista = df_dup_detalle
-              st.dataframe(df_dup_vista, use_container_width=True, height=250)
-          else:
-            st.success(
-                "✅ **Validación exitosa:** No existen números de serie de"
-                " medidor repetidos en los registros."
-            )
-
-        if "_Ultima_actualizacion" in df_levantamientos_full.columns:
-          df_vista_full = df_levantamientos_full.drop(
-              columns=["_Ultima_actualizacion"]
-          )
-        else:
-          df_vista_full = df_levantamientos_full
-
-        st.dataframe(df_vista_full, use_container_width=True, height=500)
-
-        with st.container(border=True):
-          st.markdown(
-              "#### ⚙ Sincronización Manual hacia la Tabla"
-              " `Usuarios.levantamientos`"
-          )
-          st.markdown(
-              "Ejecuta la sincronización inmediata para guardar estos datos en"
-              " tu base de datos."
-          )
-          if st.button(
-              "Sincronizar a la Tabla 'Usuarios.levantamientos'",
-              key="btn_sinc_levantamientos_manual",
-              type="primary",
+          with st.expander(
+              "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=False
           ):
-            with st.spinner("Sincronizando datos en base de datos..."):
-              exito = ejecutar_sincronizacion_levantamientos()
-              if exito:
-                st.success("¡Sincronización completada con éxito!")
-                st.rerun()
-              else:
-                st.error("Ocurrió un error durante la sincronización.")
+            if "_Ultima_actualizacion" in df_dup_detalle.columns:
+              df_dup_vista = df_dup_detalle.drop(
+                  columns=["_Ultima_actualizacion"]
+              )
+            else:
+              df_dup_vista = df_dup_detalle
+            st.dataframe(df_dup_vista, use_container_width=True, height=250)
+        else:
+          st.success(
+              "✅ **Validación exitosa:** No existen números de serie de"
+              " medidor repetidos en los registros mostrados."
+          )
+
+      if "_Ultima_actualizacion" in df_levantamientos_full.columns:
+        df_vista_full = df_levantamientos_full.drop(
+            columns=["_Ultima_actualizacion"]
+        )
+      else:
+        df_vista_full = df_levantamientos_full
+
+      st.dataframe(df_vista_full, use_container_width=True, height=500)
+
+      with st.container(border=True):
+        st.markdown(
+            "#### ⚙ Sincronización Manual hacia la Tabla"
+            " `Usuarios.levantamientos`"
+        )
+        st.markdown(
+            "Ejecuta la sincronización inmediata para guardar estos datos en"
+            " tu base de datos."
+        )
+        if st.button(
+            "Sincronizar a la Tabla 'Usuarios.levantamientos'",
+            key="btn_sinc_levantamientos_manual",
+            type="primary",
+        ):
+          with st.spinner("Sincronizando datos en base de datos..."):
+            exito = ejecutar_sincronizacion_levantamientos()
+            if exito:
+              st.success("¡Sincronización completada con éxito!")
+              st.rerun()
+            else:
+              st.error("Ocurrió un error durante la sincronización.")
