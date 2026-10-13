@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import math
 import time
 from zoneinfo import ZoneInfo
+from geoalchemy2 import Geometry, WKTElement
 import pandas as pd
 import requests
 from sqlalchemy import create_engine, text
@@ -192,7 +193,7 @@ def convertir_latlon_a_utm_wkt(lat, lon):
 
       transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
       x, y = transformer.transform(lon_f, lat_f)
-      return f"POINT ({x:.4f} {y:.4f})"
+      wkt_str = f"POINT({x:.4f} {y:.4f})"
     except ImportError:
       a = 6378137.0
       eccSquared = 0.00669438
@@ -254,7 +255,10 @@ def convertir_latlon_a_utm_wkt(lat, lon):
           )
       )
 
-      return f"POINT ({x:.4f} {y:.4f})"
+      wkt_str = f"POINT({x:.4f} {y:.4f})"
+
+    # Retornar como objeto espacial nativo PostGIS SRID 32613
+    return WKTElement(wkt_str, srid=32613)
   except Exception:
     return None
 
@@ -432,7 +436,8 @@ def ejecutar_sincronizacion_levantamientos(
 
   actualizar_progreso(
       0.15,
-      "[PASO 1/3] Descargando registros y calculando geometrías geom (UTM)...",
+      "[PASO 1/3] Descargando registros y calculando geometrías nativas"
+      " PostGIS (SRID 32613)...",
   )
   df_lev = consultar_api_levantamientos_todos(size_lote=200)
 
@@ -446,7 +451,7 @@ def ejecutar_sincronizacion_levantamientos(
   actualizar_progreso(
       0.35,
       f"[PASO 2/3] {total_descargados:,} registros listos. Guardando en"
-      " 'Usuarios.levantamientos'...",
+      " 'Usuarios.levantamientos' con formato espacial nativo...",
   )
 
   try:
@@ -459,6 +464,7 @@ def ejecutar_sincronizacion_levantamientos(
         if_exists="replace",
         index=False,
         chunksize=5000,
+        dtype={"geom": Geometry(geometry_type="POINT", srid=32613)},
     )
 
     actualizar_progreso(
@@ -705,7 +711,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con consultas en tiempo real y validación de duplicados.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code>.
             </p>
         """,
         unsafe_allow_html=True,
