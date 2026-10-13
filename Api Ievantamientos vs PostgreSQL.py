@@ -760,4 +760,116 @@ with tab1:
       else:
         df_t2_vista = df_t2
 
-      st.dataframe(df_t2_vista, use_container_width
+      st.dataframe(df_t2_vista, use_container_width=True, height=450)
+    except Exception as e:
+      st.error(f"Error al cargar datos de PostgreSQL: {e}")
+  else:
+    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
+
+with tab2:
+  st.subheader(
+      "🔍 Explorador Completo de TODOS los Registros (Con geom UTM y fid)"
+  )
+  st.markdown(
+      "Visualiza absolutamente todos los registros existentes en el servidor"
+      " con su geometría UTM calculada en el campo `geom`."
+  )
+
+  input_busqueda_serie = st.text_input(
+      "Buscar número de serie de medidor (Filtro en tiempo real)",
+      value="",
+      key="input_busq_levantamientos_full",
+  )
+
+  df_levantamientos_full = consultar_api_levantamientos_todos(size_lote=200)
+
+  if df_levantamientos_full.empty:
+    st.warning("No se encontraron registros en el endpoint.")
+  else:
+    if input_busqueda_serie.strip() != "":
+      termino = input_busqueda_serie.strip().lower()
+      if "serie" in df_levantamientos_full.columns:
+        df_levantamientos_full = df_levantamientos_full[
+            df_levantamientos_full["serie"]
+            .astype(str)
+            .str.lower()
+            .str.contains(termino, na=False)
+        ]
+
+    st.success(
+        f"¡Se cargaron y filtraron un total de"
+        f" **{len(df_levantamientos_full):,}** registros con su columna"
+        " `geom`!"
+    )
+
+    # ==========================================
+    # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
+    # ==========================================
+    if "serie" in df_levantamientos_full.columns:
+      series_limpias = (
+          df_levantamientos_full["serie"].dropna().astype(str).str.strip()
+      )
+      series_limpias = series_limpias[
+          ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
+      ]
+      conteo_series = series_limpias.value_counts()
+      series_duplicadas = conteo_series[conteo_series > 1]
+
+      if not series_duplicadas.empty:
+        st.error(
+            f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
+            " números de serie de medidor duplicados.**"
+        )
+        df_dup_detalle = df_levantamientos_full[
+            df_levantamientos_full["serie"]
+            .astype(str)
+            .str.strip()
+            .isin(series_duplicadas.index)
+        ].sort_values(by="serie")
+
+        with st.expander(
+            "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=False
+        ):
+          if "_Ultima_actualizacion" in df_dup_detalle.columns:
+            df_dup_vista = df_dup_detalle.drop(
+                columns=["_Ultima_actualizacion"]
+            )
+          else:
+            df_dup_vista = df_dup_detalle
+          st.dataframe(df_dup_vista, use_container_width=True, height=250)
+      else:
+        st.success(
+            "✅ **Validación exitosa:** No existen números de serie de medidor"
+            " repetidos en los registros mostrados."
+        )
+
+    if "_Ultima_actualizacion" in df_levantamientos_full.columns:
+      df_vista_full = df_levantamientos_full.drop(
+          columns=["_Ultima_actualizacion"]
+      )
+    else:
+      df_vista_full = df_levantamientos_full
+
+    st.dataframe(df_vista_full, use_container_width=True, height=500)
+
+    with st.container(border=True):
+      st.markdown(
+          "#### ⚙ Sincronización Manual hacia la Tabla"
+          " `Usuarios.levantamientos`"
+      )
+      st.markdown(
+          "Ejecuta la sincronización inmediata para guardar estos datos en"
+          " tu base de datos."
+      )
+      if st.button(
+          "Sincronizar a la Tabla 'Usuarios.levantamientos'",
+          key="btn_sinc_levantamientos_manual",
+          type="primary",
+      ):
+        with st.spinner("Sincronizando datos en base de datos..."):
+          exito = ejecutar_sincronizacion_levantamientos()
+          if exito:
+            st.success("¡Sincronización completada con éxito!")
+            st.rerun()
+          else:
+            st.error("Ocurrió un error durante la sincronización.")
