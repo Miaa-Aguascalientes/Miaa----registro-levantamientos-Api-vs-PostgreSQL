@@ -9,3 +9,4 @@ plotly
 numpy
 psycopg2-binary
 streamlit-autorefresh
+geoalchemy2
