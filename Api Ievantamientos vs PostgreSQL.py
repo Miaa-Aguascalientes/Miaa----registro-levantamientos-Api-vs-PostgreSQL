@@ -605,3 +605,226 @@ with col_ind2:
                 <div class="metric-title">TOTAL REGISTROS TABLA LEVANTAMIENTOS (DB)</div>
                 <div class="metric-value">{total_registros_db:,}</div>
             </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+with col_ind3:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">✅</div>
+            <div class="metric-content">
+                <div class="metric-title">SERIES VÁLIDAS EN API</div>
+                <div class="metric-value">{total_serie_api_lev:,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+
+st.markdown(
+    "<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True
+)
+
+st.markdown("#### 🔄 Estado y Progreso del Sistema")
+estado_ejecucion_placeholder = st.empty()
+barra_progreso_placeholder = st.empty()
+
+col_consola, col_info = st.columns([1, 1], gap="medium")
+with col_consola:
+  st.markdown("#### 🖥️ Consola de Registros (Tabla Levantamientos)")
+  consola_placeholder = st.empty()
+  logs_html = "<br>".join(st.session_state.logs)
+  consola_placeholder.markdown(
+      f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+  )
+
+if st.session_state.is_running and st.session_state.next_run_time:
+  ahora = datetime.now(ZONA_MEXICO)
+  if ahora >= st.session_state.next_run_time:
+    ejecutar_sincronizacion_levantamientos(
+        barra_progreso_placeholder,
+        estado_ejecucion_placeholder,
+        consola_placeholder,
+    )
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
+        st.session_state.intervalo_minutos_sel
+    )
+    st.session_state.next_run_time = sig_tiempo
+    st.rerun()
+  else:
+    segundos_totales_intervalo = st.session_state.intervalo_minutos_sel * 60
+    segundos_restantes = max(
+        0,
+        int(
+            (
+                st.session_state.next_run_time
+                - datetime.now(ZONA_MEXICO)
+            ).total_seconds()
+        ),
+    )
+    progreso_espera = max(
+        0.0,
+        min(
+            1.0,
+            1.0 - (segundos_restantes / float(segundos_totales_intervalo)),
+        ),
+    )
+    mins_r = segundos_restantes // 60
+    secs_r = segundos_restantes % 60
+    tiempo_formateado = f"{mins_r:02d}:{secs_r:02d}"
+
+    estado_ejecucion_placeholder.markdown(
+        f"⏳ **Temporizador activo.** Próxima ejecución a las"
+        f" **{st.session_state.next_run_time.strftime('%H:%M:%S')}** (Restan"
+        f" **{tiempo_formateado}**)"
+    )
+    barra_progreso_placeholder.progress(
+        progreso_espera,
+        text=f"Tiempo en espera — Restan {tiempo_formateado}",
+    )
+    time.sleep(1)
+    st.rerun()
+else:
+  estado_ejecucion_placeholder.markdown(
+      "⏸️ **Temporizador inactivo.** Presiona **INICIAR** en la barra lateral."
+  )
+  barra_progreso_placeholder.progress(0, text="Listo para iniciar...")
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+with col_info:
+  st.markdown("#### ℹ️ Información del Módulo")
+  with st.container(border=True):
+    st.markdown(
+        """
+            <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px;">
+                Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
+            </h4>
+            <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
+                Este programa apunta directamente al esquema y tabla <b>Usuarios.levantamientos</b> en PostgreSQL. El campo <code>_Ultima_actualizacion</code> se registra automáticamente con la hora actual de México al sincronizar, pero se oculta de la visualización en pantalla.
+            </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+# ==========================================
+# 9. PESTAÑAS DE LA APLICACIÓN
+# ==========================================
+tab1, tab2 = st.tabs([
+    "🚰 Tabla PostgreSQL: Usuarios.levantamientos",
+    "🔍 Explorador API Levantamientos",
+])
+
+with tab1:
+  st.markdown(
+      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
+      " almacenados en la tabla PostgreSQL: <code>Usuarios.levantamientos</code></p>",
+      unsafe_allow_html=True,
+  )
+  if total_registros_db > 0:
+    try:
+      engine_pg = obtener_motor_postgres()
+      t2_filas = 50
+      t2_total_pags = max(
+          1,
+          (total_registros_db // t2_filas)
+          + (1 if total_registros_db % t2_filas > 0 else 0),
+      )
+      t2_pag = st.selectbox(
+          "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
+      )
+      df_t2 = pd.read_sql(
+          text(
+              'SELECT * FROM "Usuarios"."levantamientos" LIMIT :lim OFFSET :off'
+          ),
+          con=engine_pg,
+          params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
+      )
+      # Ocultar visualmente _Ultima_actualizacion en la tabla de postgres si se desea
+      if "_Ultima_actualizacion" in df_t2.columns:
+        df_t2_vista = df_t2.drop(columns=["_Ultima_actualizacion"])
+      else:
+        df_t2_vista = df_t2
+
+      st.dataframe(df_t2_vista, use_container_width=True, height=450)
+    except Exception as e:
+      st.error(f"Error al cargar datos de PostgreSQL: {e}")
+  else:
+    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
+
+with tab2:
+  st.subheader(
+      "🔍 Explorador Completo de TODOS los Registros (Con geom UTM y fid)"
+  )
+  st.markdown(
+      "Visualiza absolutamente todos los registros existentes en el servidor"
+      " con su geometría UTM calculada en el campo `geom` (la fecha de"
+      " actualización se guarda internamente en la base de datos)."
+  )
+
+  col_busq1, col_busq2 = st.columns([3, 1])
+  with col_busq1:
+    input_busqueda_serie = st.text_input(
+        "Filtro opcional (Dejar vacío para ver TODOS)",
+        value="",
+        key="input_busq_levantamientos_full",
+    )
+  with col_busq2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    btn_consultar_api_lev = st.button(
+        "Cargar Todos los Registros", type="primary", use_container_width=True
+    )
+
+  if btn_consultar_api_lev or input_busqueda_serie == "":
+    with st.spinner(
+        "Descargando registros y calculando geometrías UTM (geom)..."
+    ):
+      df_levantamientos_full = consultar_api_levantamientos_todos(
+          busqueda=input_busqueda_serie, size_lote=200
+      )
+
+      if df_levantamientos_full.empty:
+        st.warning("No se encontraron registros en el endpoint.")
+      else:
+        st.success(
+            f"¡Se cargaron exitosamente un total de"
+            f" **{len(df_levantamientos_full):,}** registros con su columna"
+            " `geom`!"
+        )
+
+        # Ocultar visualmente _Ultima_actualizacion en la vista del explorador de la API
+        if "_Ultima_actualizacion" in df_levantamientos_full.columns:
+          df_vista_full = df_levantamientos_full.drop(
+              columns=["_Ultima_actualizacion"]
+          )
+        else:
+          df_vista_full = df_levantamientos_full
+
+        st.dataframe(df_vista_full, use_container_width=True, height=500)
+
+        with st.container(border=True):
+          st.markdown(
+              "#### ⚙ Sincronización Manual hacia la Tabla"
+              " `Usuarios.levantamientos`"
+          )
+          st.markdown(
+              "Ejecuta la sincronización inmediata para guardar estos datos en"
+              " tu base de datos (incluyendo la fecha de actualización del"
+              " sistema)."
+          )
+          if st.button(
+              "Sincronizar a la Tabla 'Usuarios.levantamientos'",
+              key="btn_sinc_levantamientos_manual",
+              type="primary",
+          ):
+            with st.spinner("Sincronizando datos en base de datos..."):
+              exito = ejecutar_sincronizacion_levantamientos()
+              if exito:
+                st.success("¡Sincronización completada con éxito!")
+                st.rerun()
+              else:
+                st.error("Ocurrió un error durante la sincronización.")
