@@ -147,7 +147,7 @@ def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
-      result = conn.execute(text('SELECT COUNT(*) FROM "levantamientos"'))
+      result = conn.execute(text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"'))
       return result.scalar()
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
@@ -177,87 +177,6 @@ def obtener_token_api():
     except Exception:
       time.sleep(2)
   return None
-
-
-def convertir_latlon_a_utm_wkt(lat, lon):
-  try:
-    if pd.isna(lat) or pd.isna(lon):
-      return None
-    lat_f = float(lat)
-    lon_f = float(lon)
-    if lat_f == 0.0 or lon_f == 0.0:
-      return None
-
-    try:
-      from pyproj import Transformer
-
-      transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
-      x, y = transformer.transform(lon_f, lat_f)
-      return f"POINT ({x:.4f} {y:.4f})"
-    except ImportError:
-      a = 6378137.0
-      eccSquared = 0.00669438
-      k0 = 0.9996
-
-      latRad = math.radians(lat_f)
-      lonRad = math.radians(lon_f)
-
-      zoneNumber = 13
-      lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
-      lonOriginRad = math.radians(lonOrigin)
-
-      e2 = eccSquared / (1 - eccSquared)
-      N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
-      T = math.tan(latRad) ** 2
-      C = e2 * math.cos(latRad) ** 2
-      A = math.cos(latRad) * (lonRad - lonOriginRad)
-
-      M = a * (
-          (
-              1
-              - eccSquared / 4
-              - 3 * eccSquared**2 / 64
-              - 5 * eccSquared**3 / 256
-          )
-          * latRad
-          - (
-              3 * eccSquared / 8
-              + 3 * eccSquared**2 / 32
-              + 45 * eccSquared**3 / 1024
-          )
-          * math.sin(2 * latRad)
-          + (15 * eccSquared**2 / 256 + 45 * eccSquared**3 / 1024)
-          * math.sin(4 * latRad)
-          - (35 * eccSquared**3 / 3072) * math.sin(6 * latRad)
-      )
-
-      x = (
-          k0
-          * N
-          * (
-              A
-              + (1 - T + C) * A**3 / 6
-              + (5 - 18 * T + T**2 + 72 * C - 58 * e2) * A**5 / 120
-          )
-          + 500000.0
-      )
-      y = (
-          k0
-          * (
-              M
-              + N
-              * math.tan(latRad)
-              * (
-                  A**2 / 2
-                  + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
-                  + (61 - 58 * T + T**2 + 600 * C - 330 * e2) * A**6 / 720
-              )
-          )
-      )
-
-      return f"POINT ({x:.4f} {y:.4f})"
-  except Exception:
-    return None
 
 
 @st.cache_data(ttl=300)
@@ -326,7 +245,7 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
   df_final = pd.concat(todos_los_registros, ignore_index=True)
 
   if not df_final.empty:
-    # Mapeo y construcción de Predio_Viv
+    # Construcción de Predio_Viv
     col_api_predio = next(
         (
             c
@@ -359,45 +278,15 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
-    # Coordenadas Latitud y Longitud
-    col_lat = next(
-        (
-            c
-            for c in ["latitud", "lat", "latitude", "y", "Latitud"]
-            if c in df_final.columns
-        ),
-        None,
-    )
-    col_lon = next(
-        (
-            c
-            for c in ["longitud", "lon", "lng", "longitude", "x", "Longitud"]
-            if c in df_final.columns
-        ),
-        None,
-    )
-
-    if col_lat and col_lon:
-      df_final["Latitud"] = pd.to_numeric(df_final[col_lat], errors="coerce")
-      df_final["Longitud"] = pd.to_numeric(df_final[col_lon], errors="coerce")
-      df_final["geom"] = df_final.apply(
-          lambda r: convertir_latlon_a_utm_wkt(r["Latitud"], r["Longitud"]),
-          axis=1,
-      )
-    else:
-      df_final["Latitud"] = None
-      df_final["Longitud"] = None
-      df_final["geom"] = None
-
-    # Mapeo de nombres exactos requeridos por la tabla
+    # Mapeo de IDs y campos requeridos
     if "id" in df_final.columns and "medidorId" not in df_final.columns:
       df_final["medidorId"] = df_final["id"]
 
-    # Eliminar campos redundantes o no deseados
+    # Limpieza de columnas redundantes
     columnas_a_remover = ["uuid", "predio", "unidad", "usuarioId", "id"]
     df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
 
-    # Insertar fid al inicio (posición 0)
+    # Insertar fid al inicio
     df_final.insert(0, "fid", range(1, len(df_final) + 1))
     df_final["_Ultima_actualizacion"] = datetime.now(ZONA_MEXICO)
 
@@ -446,17 +335,17 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.35,
-      f"[PASO 2/3] {total_descargados:,} registros obtenidos con éxito."
-      " Actualizando tabla 'levantamientos' en PostgreSQL...",
+      f"[PASO 2/3] {total_descargados:,} registros obtenidos. Guardando en"
+      " esquema 'Usuarios', tabla 'levantamientos'...",
   )
 
   try:
     engine_pg = obtener_motor_postgres()
 
-    # Reemplazo masivo o inserción directa en la tabla 'levantamientos'
     df_lev.to_sql(
         "levantamientos",
         con=engine_pg,
+        schema="Usuarios",
         if_exists="replace",
         index=False,
         chunksize=5000,
@@ -699,10 +588,10 @@ with col_info:
     st.markdown(
         """
             <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px;">
-                Gestión Exclusiva de la Tabla <code>levantamientos</code>
+                Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa ahora apunta directamente a la tabla <b>levantamientos</b> en PostgreSQL. La sincronización automática descarga todos los registros de la API con sus geometrías <code>geom</code>, <code>fid</code> y campos normalizados.
+                Este programa apunta directamente al esquema y tabla <b>Usuarios.levantamientos</b> en PostgreSQL. La sincronización automática procesa los datos y mantiene la información actualizada en tiempo real.
             </p>
         """,
         unsafe_allow_html=True,
@@ -714,14 +603,14 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Tabla PostgreSQL: levantamientos",
+    "🚰 Tabla PostgreSQL: Usuarios.levantamientos",
     "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
       "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
-      " almacenados en la tabla PostgreSQL: <code>levantamientos</code></p>",
+      " almacenados en la tabla PostgreSQL: <code>Usuarios.levantamientos</code></p>",
       unsafe_allow_html=True,
   )
   if total_registros_db > 0:
@@ -737,7 +626,9 @@ with tab1:
           "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
       )
       df_t2 = pd.read_sql(
-          text('SELECT * FROM "levantamientos" LIMIT :lim OFFSET :off'),
+          text(
+              'SELECT * FROM "Usuarios"."levantamientos" LIMIT :lim OFFSET :off'
+          ),
           con=engine_pg,
           params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
       )
@@ -745,14 +636,13 @@ with tab1:
     except Exception as e:
       st.error(f"Error al cargar datos de PostgreSQL: {e}")
   else:
-    st.warning("No hay registros en la tabla `levantamientos`.")
+    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
 
 with tab2:
   st.subheader("🔍 Explorador Completo de TODOS los Registros de Levantamientos")
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " con su estructura optimizada (`fid`, `medidorId`, `Predio_Viv`, `geom`,"
-      " etc.)."
+      " con su estructura optimizada para la tabla."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -786,14 +676,15 @@ with tab2:
 
         with st.container(border=True):
           st.markdown(
-              "#### ⚙ Sincronización Manual hacia la Tabla `levantamientos`"
+              "#### ⚙ Sincronización Manual hacia la Tabla"
+              " `Usuarios.levantamientos`"
           )
           st.markdown(
               "Ejecuta la sincronización inmediata para guardar estos datos en"
               " tu base de datos."
           )
           if st.button(
-              "Sincronizar a la Tabla 'levantamientos'",
+              "Sincronizar a la Tabla 'Usuarios.levantamientos'",
               key="btn_sinc_levantamientos_manual",
               type="primary",
           ):
