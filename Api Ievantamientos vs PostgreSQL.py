@@ -407,20 +407,47 @@ def consultar_api_levantamientos_todos(size_lote=200):
 # ==========================================
 # 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA
 # ==========================================
-def ejecutar_sincronizacion_levantamientos():
-  agregar_log(
-      "[PASO 1/3] Descargando registros y calculando geometrías UTM..."
+def ejecutar_sincronizacion_levantamientos(
+    barra_progreso_placeholder=None,
+    texto_estado_placeholder=None,
+    consola_placeholder=None,
+):
+  def actualizar_progreso(valor_pct, mensaje):
+    agregar_log(mensaje)
+    if consola_placeholder is not None:
+      logs_html = "<br>".join(st.session_state.logs)
+      consola_placeholder.markdown(
+          f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+      )
+    if barra_progreso_placeholder is not None:
+      barra_progreso_placeholder.progress(
+          valor_pct,
+          text=f"Progreso de ejecución: {int(valor_pct * 100)}% - {mensaje}",
+      )
+    if texto_estado_placeholder is not None:
+      texto_estado_placeholder.markdown(
+          f"🔄 **{mensaje}** ({int(valor_pct * 100)}%)"
+      )
+    time.sleep(0.05)
+
+  actualizar_progreso(
+      0.15,
+      "[PASO 1/3] Descargando registros y calculando geometrías UTM...",
   )
   df_lev = consultar_api_levantamientos_todos(size_lote=200)
 
   if df_lev.empty:
-    agregar_log("[ERROR] No se pudo obtener respuesta o datos del endpoint.")
+    actualizar_progreso(
+        1.0, "[ERROR] No se pudo obtener respuesta o datos del endpoint."
+    )
     return False
 
   total_descargados = len(df_lev)
-  agregar_log(
+  actualizar_progreso(
+      0.35,
       f"[PASO 2/3] {total_descargados:,} registros listos. Sincronizando en"
-      " PostgreSQL respetando tipo geometry(POINT, 32613)..."
+      " PostgreSQL respetando tipo geometry(POINT, 32613)...",
+      consola_placeholder,
   )
 
   try:
@@ -456,14 +483,15 @@ def ejecutar_sincronizacion_levantamientos():
                   {"wkt": str(wkt_val), "mid": str(med_id)},
               )
 
-    agregar_log(
+    actualizar_progreso(
+        1.0,
         f"🎉 [CICLO EXITOSO] Sincronización completada. Total guardados en"
-        f" 'Usuarios.levantamientos': {total_descargados:,}."
+        f" 'Usuarios.levantamientos': {total_descargados:,}.",
     )
     return True
   except Exception as ex:
-    agregar_log(
-        f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
+    actualizar_progreso(
+        1.0, f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
     )
     return False
 
@@ -636,10 +664,21 @@ with col_consola:
       f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
   )
 
+# Lógica robusta del temporizador continuo en bucle
 if st.session_state.is_running and st.session_state.next_run_time:
+  if st.session_state.next_run_time is None:
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
+        st.session_state.intervalo_minutos_sel
+    )
+    st.session_state.next_run_time = sig_tiempo
+
   ahora = datetime.now(ZONA_MEXICO)
   if ahora >= st.session_state.next_run_time:
-    ejecutar_sincronizacion_levantamientos()
+    ejecutar_sincronizacion_levantamientos(
+        barra_progreso_placeholder,
+        estado_ejecucion_placeholder,
+        consola_placeholder,
+    )
     sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
         st.session_state.intervalo_minutos_sel
     )
@@ -695,7 +734,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code>.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code> y temporizador continuo restablecido.
             </p>
         """,
         unsafe_allow_html=True,
