@@ -444,7 +444,7 @@ def ejecutar_sincronizacion_levantamientos():
     if wkt_col is not None:
       with engine_pg.begin() as conn:
         for idx, wkt_val in enumerate(wkt_col):
-          if wkt_val:
+          if wkt_val and pd.notna(wkt_val):
             med_id = df_lev.iloc[idx].get("medidorId")
             if med_id is not None:
               conn.execute(
@@ -453,7 +453,7 @@ def ejecutar_sincronizacion_levantamientos():
                                     SET geom = ST_GeomFromText(:wkt, 32613) 
                                     WHERE "medidorId" = :mid
                                 """),
-                  {"wkt": wkt_val, "mid": med_id},
+                  {"wkt": str(wkt_val), "mid": str(med_id)},
               )
 
     agregar_log(
