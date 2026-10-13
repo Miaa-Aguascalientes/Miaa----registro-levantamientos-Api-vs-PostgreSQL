@@ -142,7 +142,6 @@ def obtener_motor_postgres():
   return create_engine(connection_string)
 
 
-@st.cache_data(ttl=600)
 def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
@@ -569,6 +568,10 @@ with st.sidebar:
     agregar_log("⏹ Temporizador detenido manualmente.")
     st.rerun()
 
+  st.markdown("---")
+  if st.button("🔄 Actualizar Métricas de BD", use_container_width=True):
+    st.rerun()
+
 # ==========================================
 # 8. INTERFAZ PRINCIPAL
 # ==========================================
@@ -702,7 +705,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con búsqueda instantánea y validación de duplicados.
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con consultas en tiempo real y validación de duplicados.
             </p>
         """,
         unsafe_allow_html=True,
