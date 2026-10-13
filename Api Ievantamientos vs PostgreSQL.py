@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import math
 import time
 from zoneinfo import ZoneInfo
-from geoalchemy2 import Geometry, WKTElement
 import pandas as pd
 import requests
 from sqlalchemy import create_engine, text
@@ -193,7 +192,7 @@ def convertir_latlon_a_utm_wkt(lat, lon):
 
       transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
       x, y = transformer.transform(lon_f, lat_f)
-      wkt_str = f"POINT({x:.4f} {y:.4f})"
+      return f"POINT({x:.4f} {y:.4f})"
     except ImportError:
       a = 6378137.0
       eccSquared = 0.00669438
@@ -255,10 +254,7 @@ def convertir_latlon_a_utm_wkt(lat, lon):
           )
       )
 
-      wkt_str = f"POINT({x:.4f} {y:.4f})"
-
-    # Retornar como objeto espacial nativo PostGIS SRID 32613
-    return WKTElement(wkt_str, srid=32613)
+      return f"POINT({x:.4f} {y:.4f})"
   except Exception:
     return None
 
@@ -411,71 +407,63 @@ def consultar_api_levantamientos_todos(size_lote=200):
 # ==========================================
 # 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA
 # ==========================================
-def ejecutar_sincronizacion_levantamientos(
-    barra_progreso_placeholder=None,
-    texto_estado_placeholder=None,
-    consola_placeholder=None,
-):
-  def actualizar_progreso(valor_pct, mensaje):
-    agregar_log(mensaje)
-    if consola_placeholder is not None:
-      logs_html = "<br>".join(st.session_state.logs)
-      consola_placeholder.markdown(
-          f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
-      )
-    if barra_progreso_placeholder is not None:
-      barra_progreso_placeholder.progress(
-          valor_pct,
-          text=f"Progreso de ejecución: {int(valor_pct * 100)}% - {mensaje}",
-      )
-    if texto_estado_placeholder is not None:
-      texto_estado_placeholder.markdown(
-          f"🔄 **{mensaje}** ({int(valor_pct * 100)}%)"
-      )
-    time.sleep(0.05)
-
-  actualizar_progreso(
-      0.15,
-      "[PASO 1/3] Descargando registros y calculando geometrías nativas"
-      " PostGIS (SRID 32613)...",
+def ejecutar_sincronizacion_levantamientos():
+  agregar_log(
+      "[PASO 1/3] Descargando registros y calculando geometrías UTM..."
   )
   df_lev = consultar_api_levantamientos_todos(size_lote=200)
 
   if df_lev.empty:
-    actualizar_progreso(
-        1.0, "[ERROR] No se pudo obtener respuesta o datos del endpoint."
-    )
+    agregar_log("[ERROR] No se pudo obtener respuesta o datos del endpoint.")
     return False
 
   total_descargados = len(df_lev)
-  actualizar_progreso(
-      0.35,
-      f"[PASO 2/3] {total_descargados:,} registros listos. Guardando en"
-      " 'Usuarios.levantamientos' con formato espacial nativo...",
+  agregar_log(
+      f"[PASO 2/3] {total_descargados:,} registros listos. Sincronizando en"
+      " PostgreSQL respetando tipo geometry(POINT, 32613)..."
   )
 
   try:
     engine_pg = obtener_motor_postgres()
 
-    df_lev.to_sql(
+    df_para_sql = df_lev.copy()
+    wkt_col = df_para_sql.pop("geom") if "geom" in df_para_sql.columns else None
+
+    with engine_pg.begin() as conn:
+      conn.execute(text('TRUNCATE TABLE "Usuarios"."levantamientos"'))
+
+    df_para_sql.to_sql(
         "levantamientos",
         con=engine_pg,
         schema="Usuarios",
-        if_exists="replace",
+        if_exists="append",
         index=False,
         chunksize=5000,
-        dtype={"geom": Geometry(geometry_type="POINT", srid=32613)},
     )
 
-    actualizar_progreso(
-        1.0,
+    if wkt_col is not None:
+      with engine_pg.begin() as conn:
+        for idx, wkt_val in enumerate(wkt_col):
+          if wkt_val:
+            med_id = df_lev.iloc[idx].get("medidorId")
+            if med_id is not None:
+              conn.execute(
+                  text("""
+                                    UPDATE "Usuarios"."levantamientos" 
+                                    SET geom = ST_GeomFromText(:wkt, 32613) 
+                                    WHERE "medidorId" = :mid
+                                """),
+                  {"wkt": wkt_val, "mid": med_id},
+              )
+
+    agregar_log(
         f"🎉 [CICLO EXITOSO] Sincronización completada. Total guardados en"
-        f" 'Usuarios.levantamientos': {total_descargados:,}.",
+        f" 'Usuarios.levantamientos': {total_descargados:,}."
     )
     return True
   except Exception as ex:
-    actualizar_progreso(
-        1.0, f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
+    agregar_log(
+        f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
     )
     return False
 
@@ -651,11 +639,7 @@ with col_consola:
 if st.session_state.is_running and st.session_state.next_run_time:
   ahora = datetime.now(ZONA_MEXICO)
   if ahora >= st.session_state.next_run_time:
-    ejecutar_sincronizacion_levantamientos(
-        barra_progreso_placeholder,
-        estado_ejecucion_placeholder,
-        consola_placeholder,
-    )
+    ejecutar_sincronizacion_levantamientos()
     sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
         st.session_state.intervalo_minutos_sel
     )
@@ -778,99 +762,95 @@ with tab2:
       key="input_busq_levantamientos_full",
   )
 
-  with st.spinner(
-      "Descargando registros y calculando geometrías UTM (geom)..."
-  ):
-    df_levantamientos_full = consultar_api_levantamientos_todos(size_lote=200)
+  df_levantamientos_full = consultar_api_levantamientos_todos(size_lote=200)
 
-    if df_levantamientos_full.empty:
-      st.warning("No se encontraron registros en el endpoint.")
-    else:
-      # Filtrado en tiempo real por número de serie
-      if input_busqueda_serie.strip() != "":
-        termino = input_busqueda_serie.strip().lower()
-        if "serie" in df_levantamientos_full.columns:
-          df_levantamientos_full = df_levantamientos_full[
-              df_levantamientos_full["serie"]
-              .astype(str)
-              .str.lower()
-              .str.contains(termino, na=False)
-          ]
-
-      st.success(
-          f"¡Se cargaron y filtraron un total de"
-          f" **{len(df_levantamientos_full):,}** registros con su columna"
-          " `geom`!"
-      )
-
-      # ==========================================
-      # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
-      # ==========================================
+  if df_levantamientos_full.empty:
+    st.warning("No se encontraron registros en el endpoint.")
+  else:
+    if input_busqueda_serie.strip() != "":
+      termino = input_busqueda_serie.strip().lower()
       if "serie" in df_levantamientos_full.columns:
-        series_limpias = (
-            df_levantamientos_full["serie"].dropna().astype(str).str.strip()
-        )
-        series_limpias = series_limpias[
-            ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
+        df_levantamientos_full = df_levantamientos_full[
+            df_levantamientos_full["serie"]
+            .astype(str)
+            .str.lower()
+            .str.contains(termino, na=False)
         ]
-        conteo_series = series_limpias.value_counts()
-        series_duplicadas = conteo_series[conteo_series > 1]
 
-        if not series_duplicadas.empty:
-          st.error(
-              f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
-              " números de serie de medidor duplicados.**"
-          )
-          df_dup_detalle = df_levantamientos_full[
-              df_levantamientos_full["serie"]
-              .astype(str)
-              .str.strip()
-              .isin(series_duplicadas.index)
-          ].sort_values(by="serie")
+    st.success(
+        f"¡Se cargaron y filtraron un total de"
+        f" **{len(df_levantamientos_full):,}** registros con su columna"
+        " `geom`!"
+    )
 
-          with st.expander(
-              "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=False
-          ):
-            if "_Ultima_actualizacion" in df_dup_detalle.columns:
-              df_dup_vista = df_dup_detalle.drop(
-                  columns=["_Ultima_actualizacion"]
-              )
-            else:
-              df_dup_vista = df_dup_detalle
-            st.dataframe(df_dup_vista, use_container_width=True, height=250)
-        else:
-          st.success(
-              "✅ **Validación exitosa:** No existen números de serie de"
-              " medidor repetidos en los registros mostrados."
-          )
+    # ==========================================
+    # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
+    # ==========================================
+    if "serie" in df_levantamientos_full.columns:
+      series_limpias = (
+          df_levantamientos_full["serie"].dropna().astype(str).str.strip()
+      )
+      series_limpias = series_limpias[
+          ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
+      ]
+      conteo_series = series_limpias.value_counts()
+      series_duplicadas = conteo_series[conteo_series > 1]
 
-      if "_Ultima_actualizacion" in df_levantamientos_full.columns:
-        df_vista_full = df_levantamientos_full.drop(
-            columns=["_Ultima_actualizacion"]
+      if not series_duplicadas.empty:
+        st.error(
+            f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
+            " números de serie de medidor duplicados.**"
         )
-      else:
-        df_vista_full = df_levantamientos_full
+        df_dup_detalle = df_levantamientos_full[
+            df_levantamientos_full["serie"]
+            .astype(str)
+            .str.strip()
+            .isin(series_duplicadas.index)
+        ].sort_values(by="serie")
 
-      st.dataframe(df_vista_full, use_container_width=True, height=500)
-
-      with st.container(border=True):
-        st.markdown(
-            "#### ⚙ Sincronización Manual hacia la Tabla"
-            " `Usuarios.levantamientos`"
-        )
-        st.markdown(
-            "Ejecuta la sincronización inmediata para guardar estos datos en"
-            " tu base de datos."
-        )
-        if st.button(
-            "Sincronizar a la Tabla 'Usuarios.levantamientos'",
-            key="btn_sinc_levantamientos_manual",
-            type="primary",
+        with st.expander(
+            "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=False
         ):
-          with st.spinner("Sincronizando datos en base de datos..."):
-            exito = ejecutar_sincronizacion_levantamientos()
-            if exito:
-              st.success("¡Sincronización completada con éxito!")
-              st.rerun()
-            else:
-              st.error("Ocurrió un error durante la sincronización.")
+          if "_Ultima_actualizacion" in df_dup_detalle.columns:
+            df_dup_vista = df_dup_detalle.drop(
+                columns=["_Ultima_actualizacion"]
+            )
+          else:
+            df_dup_vista = df_dup_detalle
+          st.dataframe(df_dup_vista, use_container_width=True, height=250)
+      else:
+        st.success(
+            "✅ **Validación exitosa:** No existen números de serie de medidor"
+            " repetidos en los registros mostrados."
+        )
+
+    if "_Ultima_actualizacion" in df_levantamientos_full.columns:
+      df_vista_full = df_levantamientos_full.drop(
+          columns=["_Ultima_actualizacion"]
+      )
+    else:
+      df_vista_full = df_levantamientos_full
+
+    st.dataframe(df_vista_full, use_container_width=True, height=500)
+
+    with st.container(border=True):
+      st.markdown(
+          "#### ⚙ Sincronización Manual hacia la Tabla"
+          " `Usuarios.levantamientos`"
+      )
+      st.markdown(
+          "Ejecuta la sincronización inmediata para guardar estos datos en"
+          " tu base de datos."
+      )
+      if st.button(
+          "Sincronizar a la Tabla 'Usuarios.levantamientos'",
+          key="btn_sinc_levantamientos_manual",
+          type="primary",
+      ):
+        with st.spinner("Sincronizando datos en base de datos..."):
+          exito = ejecutar_sincronizacion_levantamientos()
+          if exito:
+            st.success("¡Sincronización completada con éxito!")
+            st.rerun()
+          else:
+            st.error("Ocurrió un error durante la sincronización.")
