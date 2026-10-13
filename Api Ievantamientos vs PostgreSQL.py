@@ -179,6 +179,89 @@ def obtener_token_api():
   return None
 
 
+def convertir_latlon_a_utm_wkt(lat, lon):
+  """Convierte latitud y longitud a UTM Zona 13N (EPSG:32613) en formato WKT POINT (X Y)"""
+  try:
+    if pd.isna(lat) or pd.isna(lon):
+      return None
+    lat_f = float(lat)
+    lon_f = float(lon)
+    if lat_f == 0.0 or lon_f == 0.0:
+      return None
+
+    try:
+      from pyproj import Transformer
+
+      transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
+      x, y = transformer.transform(lon_f, lat_f)
+      return f"POINT ({x:.4f} {y:.4f})"
+    except ImportError:
+      # Aproximación matemática para UTM Zona 13N
+      a = 6378137.0
+      eccSquared = 0.00669438
+      k0 = 0.9996
+
+      latRad = math.radians(lat_f)
+      lonRad = math.radians(lon_f)
+
+      zoneNumber = 13
+      lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
+      lonOriginRad = math.radians(lonOrigin)
+
+      e2 = eccSquared / (1 - eccSquared)
+      N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
+      T = math.tan(latRad) ** 2
+      C = e2 * math.cos(latRad) ** 2
+      A = math.cos(latRad) * (lonRad - lonOriginRad)
+
+      M = a * (
+          (
+              1
+              - eccSquared / 4
+              - 3 * eccSquared**2 / 64
+              - 5 * eccSquared**3 / 256
+          )
+          * latRad
+          - (
+              3 * eccSquared / 8
+              + 3 * eccSquared**2 / 32
+              + 45 * eccSquared**3 / 1024
+          )
+          * math.sin(2 * latRad)
+          + (15 * eccSquared**2 / 256 + 45 * eccSquared**3 / 1024)
+          * math.sin(4 * latRad)
+          - (35 * eccSquared**3 / 3072) * math.sin(6 * latRad)
+      )
+
+      x = (
+          k0
+          * N
+          * (
+              A
+              + (1 - T + C) * A**3 / 6
+              + (5 - 18 * T + T**2 + 72 * C - 58 * e2) * A**5 / 120
+          )
+          + 500000.0
+      )
+      y = (
+          k0
+          * (
+              M
+              + N
+              * math.tan(latRad)
+              * (
+                  A**2 / 2
+                  + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
+                  + (61 - 58 * T + T**2 + 600 * C - 330 * e2) * A**6 / 720
+              )
+          )
+      )
+
+      return f"POINT ({x:.4f} {y:.4f})"
+  except Exception:
+    return None
+
+
 @st.cache_data(ttl=300)
 def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
   token = obtener_token_api()
@@ -278,11 +361,41 @@ def consultar_api_levantamientos_todos(busqueda="", size_lote=200):
 
     df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
 
-    # Mapeo de IDs y campos requeridos
+    # Procesamiento de Latitud, Longitud y cálculo de geom (UTM WKT)
+    col_lat = next(
+        (
+            c
+            for c in ["latitud", "lat", "latitude", "y", "Latitud"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+    col_lon = next(
+        (
+            c
+            for c in ["longitud", "lon", "lng", "longitude", "x", "Longitud"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+
+    if col_lat and col_lon:
+      df_final["Latitud"] = pd.to_numeric(df_final[col_lat], errors="coerce")
+      df_final["Longitud"] = pd.to_numeric(df_final[col_lon], errors="coerce")
+      df_final["geom"] = df_final.apply(
+          lambda r: convertir_latlon_a_utm_wkt(r["Latitud"], r["Longitud"]),
+          axis=1,
+      )
+    else:
+      df_final["Latitud"] = None
+      df_final["Longitud"] = None
+      df_final["geom"] = None
+
+    # Mapeo de medidorId
     if "id" in df_final.columns and "medidorId" not in df_final.columns:
       df_final["medidorId"] = df_final["id"]
 
-    # Limpieza de columnas redundantes
+    # Limpieza de campos redundantes
     columnas_a_remover = ["uuid", "predio", "unidad", "usuarioId", "id"]
     df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
 
@@ -321,8 +434,7 @@ def ejecutar_sincronizacion_levantamientos(
 
   actualizar_progreso(
       0.15,
-      "[PASO 1/3] Descargando TODOS los registros de Levantamientos de la"
-      " API...",
+      "[PASO 1/3] Descargando registros y calculando geometrías geom (UTM)...",
   )
   df_lev = consultar_api_levantamientos_todos(busqueda="", size_lote=200)
 
@@ -335,8 +447,8 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.35,
-      f"[PASO 2/3] {total_descargados:,} registros obtenidos. Guardando en"
-      " esquema 'Usuarios', tabla 'levantamientos'...",
+      f"[PASO 2/3] {total_descargados:,} registros con geom listos. Guardando"
+      " en 'Usuarios.levantamientos'...",
   )
 
   try:
@@ -353,8 +465,8 @@ def ejecutar_sincronizacion_levantamientos(
 
     actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización completada. Total de registros"
-        f" guardados en 'levantamientos': {total_descargados:,}.",
+        f"🎉 [CICLO EXITOSO] Sincronización completada. Total guardados en"
+        f" 'Usuarios.levantamientos': {total_descargados:,}.",
     )
     return True
   except Exception as ex:
@@ -591,7 +703,7 @@ with col_info:
                 Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
             </h4>
             <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
-                Este programa apunta directamente al esquema y tabla <b>Usuarios.levantamientos</b> en PostgreSQL. La sincronización automática procesa los datos y mantiene la información actualizada en tiempo real.
+                Este programa apunta directamente al esquema y tabla <b>Usuarios.levantamientos</b> en PostgreSQL, incluyendo el cálculo UTM de la columna <b>geom</b>.
             </p>
         """,
         unsafe_allow_html=True,
@@ -639,10 +751,12 @@ with tab1:
     st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
 
 with tab2:
-  st.subheader("🔍 Explorador Completo de TODOS los Registros de Levantamientos")
+  st.subheader(
+      "🔍 Explorador Completo de TODOS los Registros (Con geom UTM y fid)"
+  )
   st.markdown(
       "Visualiza absolutamente todos los registros existentes en el servidor"
-      " con su estructura optimizada para la tabla."
+      " con su geometría UTM calculada en el campo `geom`."
   )
 
   col_busq1, col_busq2 = st.columns([3, 1])
@@ -659,7 +773,9 @@ with tab2:
     )
 
   if btn_consultar_api_lev or input_busqueda_serie == "":
-    with st.spinner("Descargando y procesando todos los registros de la API..."):
+    with st.spinner(
+        "Descargando registros y calculando geometrías UTM (geom)..."
+    ):
       df_levantamientos_full = consultar_api_levantamientos_todos(
           busqueda=input_busqueda_serie, size_lote=200
       )
@@ -669,8 +785,8 @@ with tab2:
       else:
         st.success(
             f"¡Se cargaron exitosamente un total de"
-            f" **{len(df_levantamientos_full):,}** registros limpios desde la"
-            " API!"
+            f" **{len(df_levantamientos_full):,}** registros con su columna"
+            " `geom`!"
         )
         st.dataframe(df_levantamientos_full, use_container_width=True, height=500)
 
