@@ -405,7 +405,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL (SIN TRUNCATE)
+# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL (SIN RESTRICCIONES EN BD)
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -459,10 +459,25 @@ def ejecutar_sincronizacion_levantamientos(
         chunksize=5000,
     )
 
-    # 2. Inserción filtrando por los registros que no existan previamente en la tabla principal
+    # 2. Obtenemos las columnas de la tabla temporal excepto 'fid' para que no choque con la llave primaria
+    with engine_pg.connect() as conn:
+      cols_result = conn.execute(
+          text(f"""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema = 'Usuarios' 
+                  AND table_name = '{temp_table_name}'
+                  AND column_name != 'fid'
+            """)
+      )
+      columnas = [row[0] for row in cols_result]
+
+    cols_str = ", ".join([f'"{c}"' for c in columnas])
+
+    # 3. Inserción inteligente evaluando por 'serie' sin requerir índices únicos en la BD
     query_upsert = text(f"""
-        INSERT INTO "Usuarios"."levantamientos" 
-        SELECT t.* FROM "Usuarios"."{temp_table_name}" t
+        INSERT INTO "Usuarios"."levantamientos" ({cols_str})
+        SELECT {cols_str} FROM "Usuarios"."{temp_table_name}" t
         WHERE NOT EXISTS (
             SELECT 1 FROM "Usuarios"."levantamientos" l 
             WHERE l.serie = t.serie
@@ -476,7 +491,7 @@ def ejecutar_sincronizacion_levantamientos(
     actualizar_progreso(
         1.0,
         f"🎉 [CICLO EXITOSO] Sincronización incremental completada."
-        f" Se evaluaron {total_descargados:,} registros de la API sin tocar los editados externamente.",
+        f" Se evaluaron {total_descargados:,} registros respetando tus ediciones.",
     )
     return True
   except Exception as ex:
