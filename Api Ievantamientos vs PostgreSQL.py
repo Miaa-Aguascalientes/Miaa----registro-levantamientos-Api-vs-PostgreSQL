@@ -405,7 +405,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL CON FID AUTOMÁTICO
+# 4. FUNCIÓN DE SINCRONIZACIÓN (INSERCIÓN PURA SIN ACTUALIZAR EXISTENTES)
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -442,7 +442,7 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.60,
-      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando solo nuevos en PostgreSQL...",
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando solo los nuevos (sin tocar los existentes)...",
   )
 
   try:
@@ -459,7 +459,7 @@ def ejecutar_sincronizacion_levantamientos(
         chunksize=5000,
     )
 
-    # 2. Obtenemos las columnas de la tabla temporal excepto 'fid'
+    # 2. Obtenemos las columnas de la tabla temporal excepto 'fid' para calcularlo dinámicamente
     with engine_pg.connect() as conn:
       cols_result = conn.execute(
           text(f"""
@@ -475,8 +475,9 @@ def ejecutar_sincronizacion_levantamientos(
     cols_str = ", ".join([f'"{c}"' for c in columnas])
     cols_t_str = ", ".join([f't."{c}"' for c in columnas])
 
-    # 3. Inserción inteligente calculando un 'fid' secuencial único para los nuevos registros
-    query_upsert = text(f"""
+    # 3. Inserción estricta: Solo inserta si la serie NO existe previamente en la tabla principal.
+    # Los registros que ya existan se ignoran por completo (no se actualizan, no se tocan).
+    query_insert_nuevos = text(f"""
         INSERT INTO "Usuarios"."levantamientos" ("fid", {cols_str})
         SELECT 
             (SELECT COALESCE(MAX(fid), 0) FROM "Usuarios"."levantamientos") + ROW_NUMBER() OVER () AS fid,
@@ -489,13 +490,13 @@ def ejecutar_sincronizacion_levantamientos(
     """)
 
     with engine_pg.begin() as conn:
-      conn.execute(query_upsert)
+      conn.execute(query_insert_nuevos)
       conn.execute(text(f'DROP TABLE IF EXISTS "Usuarios"."{temp_table_name}"'))
 
     actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización incremental completada."
-        f" Se evaluaron {total_descargados:,} registros respetando tus ediciones.",
+        f"🎉 [CICLO EXITOSO] Sincronización completada."
+        f" Se evaluaron {total_descargados:,} registros de la API. Los existentes se respetaron intactos y solo se agregaron los nuevos.",
     )
     return True
   except Exception as ex:
