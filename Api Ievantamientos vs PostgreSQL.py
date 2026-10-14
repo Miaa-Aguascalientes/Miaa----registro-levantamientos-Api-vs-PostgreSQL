@@ -408,7 +408,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL (SIN ACTUALIZAR EXISTENTES)
+# 4. FUNCIÓN DE SINCRONIZACIÓN (INSERTA TODO SIN SOBREESCRIBIR)
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -445,7 +445,7 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.60,
-      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando solo nuevos (sin tocar los existentes)...",
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando todo lo nuevo sin tocar los existentes...",
   )
 
   try:
@@ -478,29 +478,27 @@ def ejecutar_sincronizacion_levantamientos(
     cols_str = ", ".join([f'"{c}"' for c in columnas])
     cols_t_str = ", ".join([f't."{c}"' for c in columnas])
 
-    # 3. Inserción estricta: Solo inserta si la serie NO existe previamente. Los existentes se ignoran intactos.
-    query_insert_nuevos = text(f"""
+    # 3. Inserción abierta: Inserta todo lo que venga de la API si la serie no existe previamente, sin filtrar blancos o nulos.
+    query_insert_todo = text(f"""
         INSERT INTO "Usuarios"."levantamientos" ("fid", {cols_str})
         SELECT 
             (SELECT COALESCE(MAX(fid), 0) FROM "Usuarios"."levantamientos") + ROW_NUMBER() OVER () AS fid,
             {cols_t_str}
         FROM "Usuarios"."{temp_table_name}" t
-        WHERE t.serie IS NOT NULL 
-          AND TRIM(CAST(t.serie AS TEXT)) NOT IN ('', 'None', 'nan', 'NULL', 'null')
-          AND NOT EXISTS (
-              SELECT 1 FROM "Usuarios"."levantamientos" l 
-              WHERE LOWER(TRIM(CAST(l.serie AS TEXT))) = LOWER(TRIM(CAST(t.serie AS TEXT)))
-          );
+        WHERE NOT EXISTS (
+            SELECT 1 FROM "Usuarios"."levantamientos" l 
+            WHERE l.serie IS NOT DISTINCT FROM t.serie
+        );
     """)
 
     with engine_pg.begin() as conn:
-      conn.execute(query_insert_nuevos)
+      conn.execute(query_insert_todo)
       conn.execute(text(f'DROP TABLE IF EXISTS "Usuarios"."{temp_table_name}"'))
 
     actualizar_progreso(
         1.0,
         f"🎉 [CICLO EXITOSO] Sincronización completada."
-        f" Se evaluaron {total_descargados:,} registros. Los existentes se respetaron intactos.",
+        f" Se evaluaron {total_descargados:,} registros de la API. Los existentes se respetaron intactos.",
     )
     return True
   except Exception as ex:
