@@ -604,6 +604,58 @@ with st.sidebar:
   if st.button("🔄 Actualizar Métricas de BD", use_container_width=True):
     st.rerun()
 
+  # ==========================================
+  # BOTÓN DE BORRADO TOTAL DE LA TABLA
+  # ==========================================
+  st.markdown("---")
+  st.markdown("#### ⚠️ Zona de Peligro")
+
+  # Creamos un estado en session_state para controlar la confirmación visual
+  if "confirmar_borrado" not in st.session_state:
+    st.session_state.confirmar_borrado = False
+
+  if not st.session_state.confirmar_borrado:
+    if st.button(
+        "🗑️ Vaciar Tabla Levantamientos",
+        type="secondary",
+        use_container_width=True,
+    ):
+      st.session_state.confirmar_borrado = True
+      st.rerun()
+  else:
+    st.warning("¿Estás seguro? Se borrarán TODOS los registros de la BD.")
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+      if st.button(
+          "Sí, vaciar", type="primary", use_container_width=True, key="btn_si"
+      ):
+        try:
+          engine_pg = obtener_motor_postgres()
+          with engine_pg.begin() as conn:
+            conn.execute(
+                text('TRUNCATE TABLE "Usuarios"."levantamientos"')
+            )
+          agregar_log(
+              "🗑️ [TABLA VACIADA] Se eliminaron todos los registros de la"
+              " tabla Usuarios.levantamientos."
+          )
+          st.success("¡Tabla vaciada correctamente!")
+        except Exception as ex:
+          agregar_log(
+              f"❌ [ERROR AL VACIAR] No se pudo vaciar la tabla: {ex}"
+          )
+          st.error(f"Error: {ex}")
+
+        st.session_state.confirmar_borrado = False
+        time.sleep(1)
+        st.rerun()
+    with col_b2:
+      if st.button(
+          "Cancelar", type="secondary", use_container_width=True, key="btn_no"
+      ):
+        st.session_state.confirmar_borrado = False
+        st.rerun()
+
 # ==========================================
 # 8. INTERFAZ PRINCIPAL
 # ==========================================
