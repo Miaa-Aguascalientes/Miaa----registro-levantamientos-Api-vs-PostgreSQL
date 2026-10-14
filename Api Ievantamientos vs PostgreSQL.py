@@ -405,7 +405,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN AUTOMÁTICA INSTÁNTANEA
+# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL (SIN TRUNCATE)
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -442,32 +442,41 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.60,
-      f"[PASO 2/2] {total_descargados:,} registros listos. Guardando de golpe"
-      " en PostgreSQL...",
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando solo nuevos en PostgreSQL...",
   )
 
   try:
     engine_pg = obtener_motor_postgres()
 
-    with engine_pg.begin() as conn:
-      # Limpiar tabla respetando su estructura y tipo geometry(POINT, 32613)
-      conn.execute(text('TRUNCATE TABLE "Usuarios"."levantamientos"'))
-
-    # Inserción masiva directa y ultra rápida a través de to_sql.
-    # PostGIS interpreta automáticamente el formato WKT de la columna 'geom' como geometría espacial nativa.
+    # 1. Cargamos los datos a una tabla temporal en PostgreSQL
+    temp_table_name = "tmp_levantamientos_sync"
     df_lev.to_sql(
-        "levantamientos",
+        temp_table_name,
         con=engine_pg,
         schema="Usuarios",
-        if_exists="append",
+        if_exists="replace",
         index=False,
         chunksize=5000,
     )
 
+    # 2. Realizamos la inserción inteligente (INSERT ... ON CONFLICT DO NOTHING)
+    # Reemplaza 'serie' o 'medidorId' por la columna que sirva como identificador único real en tu tabla.
+    query_upsert = text(f"""
+        INSERT INTO "Usuarios"."levantamientos" 
+        SELECT * FROM "Usuarios"."{temp_table_name}"
+        ON CONFLICT (serie) DO NOTHING;
+    """)
+
+    with engine_pg.begin() as conn:
+      # Opcional: Asegúrate de que la columna 'serie' tenga una restricción UNIQUE en tu base de datos PostgreSQL.
+      conn.execute(query_upsert)
+      # Limpiamos la tabla temporal
+      conn.execute(text(f'DROP TABLE IF EXISTS "Usuarios"."{temp_table_name}"'))
+
     actualizar_progreso(
         1.0,
-        f"🎉 [CICLO EXITOSO] Sincronización instantánea completada."
-        f" {total_descargados:,} registros guardados.",
+        f"🎉 [CICLO EXITOSO] Sincronización incremental completada."
+        f" Se evaluaron {total_descargados:,} registros de la API sin tocar los editados externamente.",
     )
     return True
   except Exception as ex:
