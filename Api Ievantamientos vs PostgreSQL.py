@@ -405,7 +405,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
 
 
 # ==========================================
-# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL (SIN RESTRICCIONES EN BD)
+# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL CON FID AUTOMÁTICO
 # ==========================================
 def ejecutar_sincronizacion_levantamientos(
     barra_progreso_placeholder=None,
@@ -459,7 +459,7 @@ def ejecutar_sincronizacion_levantamientos(
         chunksize=5000,
     )
 
-    # 2. Obtenemos las columnas de la tabla temporal excepto 'fid' para que no choque con la llave primaria
+    # 2. Obtenemos las columnas de la tabla temporal excepto 'fid'
     with engine_pg.connect() as conn:
       cols_result = conn.execute(
           text(f"""
@@ -473,11 +473,15 @@ def ejecutar_sincronizacion_levantamientos(
       columnas = [row[0] for row in cols_result]
 
     cols_str = ", ".join([f'"{c}"' for c in columnas])
+    cols_t_str = ", ".join([f't."{c}"' for c in columnas])
 
-    # 3. Inserción inteligente evaluando por 'serie' sin requerir índices únicos en la BD
+    # 3. Inserción inteligente calculando un 'fid' secuencial único para los nuevos registros
     query_upsert = text(f"""
-        INSERT INTO "Usuarios"."levantamientos" ({cols_str})
-        SELECT {cols_str} FROM "Usuarios"."{temp_table_name}" t
+        INSERT INTO "Usuarios"."levantamientos" ("fid", {cols_str})
+        SELECT 
+            (SELECT COALESCE(MAX(fid), 0) FROM "Usuarios"."levantamientos") + ROW_NUMBER() OVER () AS fid,
+            {cols_t_str}
+        FROM "Usuarios"."{temp_table_name}" t
         WHERE NOT EXISTS (
             SELECT 1 FROM "Usuarios"."levantamientos" l 
             WHERE l.serie = t.serie
