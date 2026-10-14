@@ -459,18 +459,18 @@ def ejecutar_sincronizacion_levantamientos(
         chunksize=5000,
     )
 
-    # 2. Realizamos la inserción inteligente (INSERT ... ON CONFLICT DO NOTHING)
-    # Reemplaza 'serie' o 'medidorId' por la columna que sirva como identificador único real en tu tabla.
+    # 2. Inserción filtrando por los registros que no existan previamente en la tabla principal
     query_upsert = text(f"""
         INSERT INTO "Usuarios"."levantamientos" 
-        SELECT * FROM "Usuarios"."{temp_table_name}"
-        ON CONFLICT (serie) DO NOTHING;
+        SELECT t.* FROM "Usuarios"."{temp_table_name}" t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM "Usuarios"."levantamientos" l 
+            WHERE l.serie = t.serie
+        );
     """)
 
     with engine_pg.begin() as conn:
-      # Opcional: Asegúrate de que la columna 'serie' tenga una restricción UNIQUE en tu base de datos PostgreSQL.
       conn.execute(query_upsert)
-      # Limpiamos la tabla temporal
       conn.execute(text(f'DROP TABLE IF EXISTS "Usuarios"."{temp_table_name}"'))
 
     actualizar_progreso(
