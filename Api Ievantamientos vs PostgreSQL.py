@@ -1,1131 +1,941 @@
-# Levantamientos - Gestión de Predios (MIAA)
-import base64
-import datetime
-import time as t
+# ==========================================
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS
+# ==========================================
+from datetime import datetime, timedelta
+import math
+import time
 from zoneinfo import ZoneInfo
-import folium
-from folium.plugins import Fullscreen, MarkerCluster
 import pandas as pd
-from pyproj import Transformer
+import requests
 from sqlalchemy import create_engine, text
 import streamlit as st
-from streamlit_folium import st_folium
 
-# Configuración de página
+ZONA_MEXICO = ZoneInfo("America/Mexico_City")
+
 st.set_page_config(
-    layout="wide",
-    page_title="Gestión Levantamientos de Predios - MIAA",
+    page_title="Sistema Scada - Levantamientos MIAA",
     page_icon="https://www.miaa.mx/favicon.ico",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# 01 SECCION ----------------------------------------------------------------------------------------------- ESTADO DE SESIÓN ----------------------------------------------------------------------------------------
-if "registro_to_delete" not in st.session_state:
-  st.session_state.registro_to_delete = None
-if "active_tab" not in st.session_state:
-  st.session_state.active_tab = "⚙️ Editar"
-if "autenticado" not in st.session_state:
-  st.session_state.autenticado = False
-if "gestor_bd_autenticado" not in st.session_state:
-  st.session_state.gestor_bd_autenticado = False
-if "confirmar_borrado_total" not in st.session_state:
-  st.session_state.confirmar_borrado_total = False
-
-zona_mx = ZoneInfo("America/Mexico_City")
-
-# Transformadores de coordenadas (UTM Zona 13N <-> Lat/Lon WGS84)
-transformer_to_latlon = Transformer.from_crs(
-    "EPSG:32613", "EPSG:4326", always_xy=True
-)
-transformer_to_utm = Transformer.from_crs(
-    "EPSG:4326", "EPSG:32613", always_xy=True
-)
-
-COLUMNAS_FECHA = ["fechaRegistro", "fechaModificacion", "_Ultima_actualizacion"]
-
-def parsear_fecha_segura(val_fecha):
-  if (
-      pd.isna(val_fecha)
-      or val_fecha is None
-      or str(val_fecha).strip() in ["", "nan", "None", "NaT"]
-  ):
-    return datetime.date.today()
-  if isinstance(val_fecha, (datetime.date, datetime.datetime)):
-    return val_fecha if isinstance(val_fecha, datetime.date) else val_fecha.date()
-  try:
-    dt = pd.to_datetime(val_fecha, dayfirst=True, errors="coerce")
-    if pd.isna(dt):
-      dt = pd.to_datetime(val_fecha, errors="coerce")
-    if pd.isna(dt):
-      return datetime.date.today()
-    return dt.date()
-  except Exception:
-    return datetime.date.today()
-
-def formatear_fecha_str(val_fecha):
-  if (
-      pd.isna(val_fecha)
-      or val_fecha is None
-      or str(val_fecha).strip() in ["", "nan", "None", "NaT"]
-  ):
-    return ""
-  if isinstance(val_fecha, (datetime.date, datetime.datetime)):
-    d = val_fecha if isinstance(val_fecha, datetime.date) else val_fecha.date()
-    return d.strftime("%d/%m/%Y")
-  try:
-    dt = pd.to_datetime(val_fecha, dayfirst=True, errors="coerce")
-    if pd.isna(dt):
-      dt = pd.to_datetime(val_fecha, errors="coerce")
-    if pd.isna(dt):
-      return str(val_fecha)
-    return dt.strftime("%d/%m/%Y")
-  except Exception:
-    return str(val_fecha)
-
-def formatear_columnas_fecha(df):
-  if df is None or df.empty:
-    return df
-  df_copia = df.copy()
-  for col in COLUMNAS_FECHA:
-    if col in df_copia.columns:
-      df_copia[col] = df_copia[col].apply(formatear_fecha_str)
-  return df_copia
-
-# 02 SECCION -------------------------------------------------------------------------- CONEXIÓN A BASE DE DATOS POSTGRESQL (Esquema Usuarios, Tabla levantamientos) --------------------------------------------------------------------------------------
-
-def crear_nuevo_engine():
-  pg = st.secrets["postgres"]
-  db_url = f"postgresql+psycopg2://{pg['user']}:{pg['password']}@{pg['host']}:{pg['port']}/{pg['database']}"
-  return create_engine(
-      db_url,
-      pool_pre_ping=True,
-      pool_recycle=1800,
-      pool_timeout=60,
-      connect_args={"connect_timeout": 60},
-  )
-
-if "db_engine" not in st.session_state:
-  st.session_state.db_engine = crear_nuevo_engine()
-
-def obtener_datos(query, params=None):
-  for intento in range(2):
-    try:
-      with st.session_state.db_engine.connect() as conn:
-        df = pd.read_sql(
-            text(query) if isinstance(query, str) else query,
-            conn,
-            params=params or {},
-        )
-        return df, None
-    except Exception:
-      try:
-        st.session_state.db_engine.dispose()
-        st.session_state.db_engine = crear_nuevo_engine()
-        with st.session_state.db_engine.connect() as conn:
-          df = pd.read_sql(
-              text(query) if isinstance(query, str) else query,
-              conn,
-              params=params or {},
-          )
-          return df, None
-      except Exception as e2:
-        if intento == 1:
-          return pd.DataFrame(), str(e2)
-  return pd.DataFrame(), "Error de conexión persistente."
-
-def ejecutar_sql(query, params=None):
-  with st.session_state.db_engine.connect() as conn:
-    with conn.begin():
-      conn.execute(
-          text(query) if isinstance(query, str) else query, params or {}
-      )
-  return True
-
-# 03 SECCION ------------------------------------------------------------------- CONEXIÓN A MYSQL (USUARIOS / LOGIN) --------------------------------------------------------------------------------------------------
-def crear_engine_mysql():
-  mysql_sec = st.secrets["mysql_usuarios_levantamientos"]
-  db_url = f"mysql+pymysql://{mysql_sec['user']}:{mysql_sec['password']}@{mysql_sec['host']}:{mysql_sec['port']}/{mysql_sec['database']}"
-  return create_engine(
-      db_url,
-      pool_pre_ping=True,
-      pool_recycle=1800,
-      pool_timeout=60,
-      connect_args={"connect_timeout": 60},
-  )
-
-if "db_mysql_engine" not in st.session_state:
-  st.session_state.db_mysql_engine = crear_engine_mysql()
-
-def obtener_datos_mysql(query, params=None):
-  for intento in range(2):
-    try:
-      with st.session_state.db_mysql_engine.connect() as conn:
-        df = pd.read_sql(
-            text(query) if isinstance(query, str) else query,
-            conn,
-            params=params or {},
-        )
-        return df, None
-    except Exception:
-      try:
-        st.session_state.db_mysql_engine.dispose()
-        st.session_state.db_mysql_engine = crear_engine_mysql()
-        with st.session_state.db_mysql_engine.connect() as conn:
-          df = pd.read_sql(
-              text(query) if isinstance(query, str) else query,
-              conn,
-              params=params or {},
-          )
-          return df, None
-      except Exception as e2:
-        if intento == 1:
-          return pd.DataFrame(), str(e2)
-  return pd.DataFrame(), "Error de conexión persistente a MySQL."
-
-def agregar_capas_base_mapa(m):
-  # Vista Satélite (Google) por defecto
-  folium.TileLayer(
-      tiles="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-      name="Vista Satélite",
-      attr="Google",
-      max_zoom=20,
-      overlay=False,
-      control=True,
-      checked=True,
-  ).add_to(m)
-
-  # Satélite (Esri) como alternativa
-  folium.TileLayer(
-      tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      name="Satélite (Esri)",
-      attr="Esri",
-      max_zoom=20,
-      overlay=False,
-      control=True,
-      checked=False,
-  ).add_to(m)
-
-# 04 SECCION ------------------------------------------------------------- ESTILOS CSS CON BARRA LATERAL FIJA Y LOGOTIPO MÁS ARRIBA --------------------------------------------------------------------------------
-st.write(
-    """<style>
-    #MainMenu, [data-testid="stHeader"] {visibility: hidden !important; display: none !important;} 
-    
-    div[data-baseweb="calendar"] header,
-    div[data-baseweb="popover"] header {
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-        background-color: #0D1424 !important;
-        color: #00E5FF !important;
-    }
-    div[data-baseweb="calendar"] header button,
-    div[data-baseweb="calendar"] header div,
-    div[data-baseweb="calendar"] header svg {
-        color: #00E5FF !important;
-        fill: #00E5FF !important;
-    }
-
-    .block-container {
-        padding-top: 0.5rem !important; 
-        padding-bottom: 3rem !important;
-        padding-left: 2rem !important;
-        padding-right: 2rem !important;
-        background: #080C14;
-        color: #F8FAFC;
-        max-width: 1650px !important;
-    }
-    body, [data-testid="stAppViewContainer"] {
-        background: #080C14;
-        color: #F8FAFC;
-    }
-
-    [data-testid="stSidebar"] {
-        background-color: #0A0F1D !important;
-        border-right: 1px solid rgba(0, 229, 255, 0.15) !important;
-        padding-top: 0rem !important;
-        min-width: 280px !important;
-        max-width: 320px !important;
-        transform: none !important;
-        visibility: visible !important;
-        display: block !important;
-    }
-    
-    [data-testid="stSidebarNavSeparator"], button[kind="header"], [data-testid="collapsedControl"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-
-    [data-testid="stSidebar"] .block-container {
-        padding-top: 0rem !important;
-        padding-left: 1rem !important;
-        padding-right: 1rem !important;
-    }
-
-    div.row-widget.stRadio > div {
-        display: flex;
-        flex-direction: column;
-        gap: 8px !important;
-    }
-
-    div.row-widget.stRadio input[type="radio"],
-    div.row-widget.stRadio div[role="radiogroup"] > label > div:first-child {
-        display: none !important;
-    }
-
-    div.row-widget.stRadio div[role="radiogroup"] > label {
-        background: #0D1424 !important;
-        border: 1px solid rgba(0, 229, 255, 0.15) !important;
-        border-radius: 8px !important;
-        padding: 10px 14px !important;
-        margin: 0 !important;
-        cursor: pointer !important;
-        transition: all 0.2s ease-in-out !important;
-        width: 100% !important;
-    }
-
-    div.row-widget.stRadio div[role="radiogroup"] label p,
-    div.row-widget.stRadio div[role="radiogroup"] label span {
-        color: #94A3B8 !important;
-        font-weight: 600 !important;
-        font-size: 0.9rem !important;
-    }
-
-    div.row-widget.stRadio div[role="radiogroup"] > label:hover {
-        background: #152035 !important;
-        border-color: rgba(0, 229, 255, 0.4) !important;
-        transform: translateX(4px) !important;
-    }
-
-    div.row-widget.stRadio div[role="radiogroup"] > label[data-checked="true"] {
-        background: linear-gradient(90deg, #0A2540 0%, #0D1424 100%) !important;
-        border-left: 4px solid #00E5FF !important;
-        border-color: rgba(0, 229, 255, 0.5) !important;
-        box-shadow: 0 2px 10px rgba(0, 229, 255, 0.15) !important;
-    }
-
-    div.row-widget.stRadio div[role="radiogroup"] > label[data-checked="true"] p,
-    div.row-widget.stRadio div[role="radiogroup"] > label[data-checked="true"] span {
-        color: #00E5FF !important;
-        font-weight: 700 !important;
-    }
-
-    .user-card {
-        background: #0D1424;
-        border: 1px solid rgba(0, 229, 255, 0.15);
-        border-left: 4px solid #00E5FF;
-        border-radius: 6px;
-        padding: 12px 16px;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-        margin-bottom: 10px;
-    }
-
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stDateInput label, [data-testid="stWidgetLabel"] p {
-        color: #E2E8F0 !important;
-        font-weight: 600 !important;
-        font-size: 0.85rem !important;
-    }
-
-    .stButton>button {
-        background: #1E293B !important;
-        color: #F8FAFC !important;
-        border: 1px solid rgba(0, 229, 255, 0.25) !important;
-        border-radius: 8px !important;
-        font-weight: 600 !important;
-        padding: 0.55rem 1.2rem !important;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-    }
-    .stButton>button:hover {
-        background: #334155 !important;
-        border-color: #00E5FF !important;
-        color: #00E5FF !important;
-        box-shadow: 0 0 12px rgba(0, 229, 255, 0.3) !important;
-        transform: translateY(-1px) !important;
-    }
-
-    .stButton>button:has(p:contains("Actualizar")), 
-    .stButton>button:has(span:contains("Actualizar")),
-    .stButton>button:has(p:contains("Guardar")), 
-    .stButton>button:has(span:contains("Guardar")),
-    div[data-testid="stFormSubmitButton"]>button {
-        background: linear-gradient(135deg, #0284C7 0%, #00B4D8 100%) !important;
-        color: #FFFFFF !important;
-        border: 1px solid #00E5FF !important;
-        font-weight: 700 !important;
-        box-shadow: 0 4px 15px rgba(0, 180, 216, 0.35) !important;
-    }
-    .stButton>button:has(p:contains("Actualizar")):hover,
-    .stButton>button:has(span:contains("Actualizar")):hover,
-    .stButton>button:has(p:contains("Guardar")):hover,
-    .stButton>button:has(span:contains("Guardar")):hover {
-        background: linear-gradient(135deg, #0369A1 0%, #0096C7 100%) !important;
-        box-shadow: 0 0 20px rgba(0, 229, 255, 0.6) !important;
-        color: #FFFFFF !important;
-    }
-
-    .stButton>button:has(p:contains("Eliminar")), 
-    .stButton>button:has(span:contains("Eliminar")) {
-        background: rgba(153, 27, 27, 0.25) !important;
-        color: #FCA5A5 !important;
-        border: 1px solid rgba(239, 68, 68, 0.5) !important;
-    }
-    .stButton>button:has(p:contains("Eliminar")):hover,
-    .stButton>button:has(span:contains("Eliminar")):hover {
-        background: #991B1B !important;
-        color: #FFFFFF !important;
-        border-color: #EF4444 !important;
-        box-shadow: 0 0 15px rgba(239, 68, 68, 0.5) !important;
-    }
-    div[data-baseweb="input"] input, div[data-baseweb="base-input"] input, div[data-baseweb="textarea"] textarea {
-        background-color: #080C14 !important;
-        color: #F8FAFC !important;
-        border-color: rgba(0, 229, 255, 0.25) !important;
-        border-radius: 6px !important;
-        font-size: 0.9rem !important;
-    } 
-    
-    [data-testid="stExpander"] {
-        background-color: #080C14 !important;
-        border: 1px solid rgba(0, 229, 255, 0.15) !important;
-        border-radius: 6px !important;
-        margin-top: 3px !important;
-        margin-bottom: 3px !important;
-    }
-
-    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
-        gap: 0.2rem !important;
-    }
-
-    [data-testid="stExpander"] summary {
-        color: #00E5FF !important;
-        font-size: 0.85rem !important;
-        font-weight: 600 !important;
-        padding-top: 6px !important;
-        padding-bottom: 6px !important;
-    }
-
-    @keyframes fadeInSlide {
-        0% { opacity: 0; transform: translateY(25px) scale(0.98); }
-        100% { opacity: 1; transform: translateY(0) scale(1); }
-    }
-
-    @keyframes pulseGlow {
-        0% { box-shadow: 0 0 15px rgba(0, 229, 255, 0.1); }
-        50% { box-shadow: 0 0 30px rgba(0, 229, 255, 0.35); }
-        100% { box-shadow: 0 0 15px rgba(0, 229, 255, 0.1); }
-    }
-
-    @keyframes floatLogo {
-        0%, 100% { transform: translateY(0px); }
-        50% { transform: translateY(-6px); }
-    }
-
-    .login-container-animated {
-        animation: fadeInSlide 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-        background: linear-gradient(145deg, #0D1424 0%, #0A0F1D 100%);
-        border: 1px solid rgba(0, 229, 255, 0.25);
-        border-radius: 14px;
-        padding: 35px 40px;
-        box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
-        animation: fadeInSlide 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards, pulseGlow 4s infinite ease-in-out;
-        margin-top: 4vh;
-    }
-
-    .login-logo-animated {
-        animation: floatLogo 3s infinite ease-in-out;
-    }
-</style>""",
-    unsafe_allow_html=True,
-)
-
-# 05 SECCION ------------------------------------------------------------------- SISTEMA DE LOGIN CONECTADO A MYSQL -----------------------------------------------------------------------------------------------
-if not st.session_state.autenticado:
-  _, col_centro, _ = st.columns([1, 1.4, 1])
-
-  with col_centro:
-    st.markdown(
-        """
-        <div class="login-container-animated">
-            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; width: 100%; margin-bottom: 25px;">
-                <img src="https://raw.githubusercontent.com/Miaa-Aguascalientes/Logos/38504978c8f77a4dac38ad476f74dbdee6af2cad/LogoMIAA.svg" class="login-logo-animated" style="width: 200px; height: auto; margin-bottom: 15px;" />
-                <h3 style="color: #00E5FF; font-size: 1.5rem; font-weight: 800; margin: 0 0 8px 0; letter-spacing: -0.5px;">Acceso al Sistema</h3>
-                <p style="color: #94A3B8; font-size: 0.9rem; margin: 0;">Gestión de Levantamientos de Predios</p>
-            </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.form("login_form"):
-      usuario_input = st.text_input("Usuario")
-      password_input = st.text_input("Contraseña", type="password")
-      
-      st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-      submit_login = st.form_submit_button(
-          "Iniciar Sesión", use_container_width=True
-      )
-
-      if submit_login:
-        if usuario_input and password_input:
-          query_login = """
-                        SELECT id, usuario, password, tipo_usuario, departamento 
-                        FROM usuarios_levantamientos 
-                        WHERE TRIM(usuario) = :usu AND TRIM(CAST(password AS CHAR)) = :pas
-                    """
-          df_user, err_login = obtener_datos_mysql(
-              query_login,
-              {"usu": usuario_input.strip(), "pas": str(password_input).strip()},
-          )
-
-          if not err_login and not df_user.empty:
-            st.session_state.autenticado = True
-            st.session_state.usuario_actual = df_user.iloc[0]["usuario"]
-            st.session_state.tipo_usuario = (
-                str(df_user.iloc[0]["tipo_usuario"]).strip().lower()
-            )
-            st.session_state.departamento = df_user.iloc[0]["departamento"]
-            st.success("¡Acceso concedido!")
-            t.sleep(0.5)
-            st.rerun()
-          else:
-            st.error("Usuario o contraseña incorrectos.")
-        else:
-          st.warning("Por favor, ingrese usuario y contraseña.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-  st.stop()
-
-es_operador = st.session_state.get("tipo_usuario", "") == "operador"
-
-# 07 SECCION ------------------------------------------------------------------------ CABECERA PRINCIPAL ---------------------------------------------------------------------------------------------------------
 st.markdown(
     """
-    <div style="text-align: center; margin-bottom: 10px; margin-top: 0px;">
-        <h1 style="color: #00E5FF; font-size: 1.8rem; font-weight: 800; margin: 0; letter-spacing: -0.5px;">Gestión de Levantamientos de Predios</h1>
-    </div>
+    <style>
+        /* Ocultar elementos predeterminados de la interfaz de Streamlit */
+        #MainMenu {visibility: hidden;}
+        header {visibility: hidden;}
+        footer {visibility: hidden;}
+        
+        /* BLOQUEAR LA BARRA LATERAL PARA QUE NUNCA SE PUEDA OCULTAR O COLAPSAR */
+        [data-testid="stSidebar"] {
+            min-width: 280px !important;
+            max-width: 320px !important;
+            transform: none !important;
+        }
+        [data-testid="collapsedControl"] {
+            display: none !important;
+        }
+        button[kind="header"] {
+            display: none !important;
+        }
+        
+        /* EVITAR COMPLETAMENTE LA OPACIDAD O EFECTO GRIS CUANDO STREAMLIT SE EJECUTA O ACTUALIZA */
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main, .block-container {
+            opacity: 1 !important;
+            filter: none !important;
+            pointer-events: auto !important;
+        }
+        [data-testid="stStatusWidget"] {
+            display: none !important;
+        }
+        
+        /* Eliminar el espacio superior por defecto de la página */
+        .block-container {
+            padding-top: 1rem !important;
+            padding-bottom: 0rem !important;
+        }
+        
+        header hr, .stApp > header + div hr, [data-testid="stHeader"] hr, hr {
+            display: none !important;
+        }
+        
+        .metric-card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+        }
+        .metric-content {
+            display: flex;
+            flex-direction: column;
+        }
+        .metric-title {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+        .metric-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #f8fafc;
+        }
+        
+        /* Consola con altura exacta alineada */
+        .terminal-box {
+            background-color: #0b0f19;
+            border: 1px solid #22c55e;
+            color: #22c55e;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 15px;
+            border-radius: 6px;
+            height: 505px;
+            overflow-y: scroll;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        
+        [data-testid="stVerticalBlock"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background-color: #0e1322 !important;
+            border: 1px solid #334155 !important;
+            border-radius: 8px !important;
+            height: 567px !important;
+            overflow-y: auto !important;
+            padding: 15px !important;
+        }
+    </style>
 """,
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    "<hr style='border: 0.5px solid rgba(0,229,255,0.2); margin: 10px 0;'>",
-    unsafe_allow_html=True,
+# ==========================================
+# 2. GESTIÓN DE LOGS (CONSOLA - HORA MÉXICO)
+# ==========================================
+if "logs" not in st.session_state:
+  st.session_state.logs = [
+      f"[{datetime.now(ZONA_MEXICO).strftime('%H:%M:%S')}] Sistema inicializado"
+      " correctamente (Módulo de Levantamientos). Esperando ciclo..."
+  ]
+
+if "confirmar_borrado_total" not in st.session_state:
+  st.session_state.confirmar_borrado_total = False
+
+
+def agregar_log(mensaje):
+  timestamp = datetime.now(ZONA_MEXICO).strftime("%H:%M:%S")
+  st.session_state.logs.insert(0, f"[{timestamp}] {mensaje}")
+  if len(st.session_state.logs) > 300:
+    st.session_state.logs.pop()
+
+
+# ==========================================
+# 3. CONEXIONES Y CONSULTAS (SQL Y API)
+# ==========================================
+BASE_URL = "https://prelec.miaa.mx"
+URL_LOGIN_CORRECTA = "/auth/login"
+URL_LEVANTAMIENTOS = (
+    "https://prelec.miaa.mx/msvc-tecnica/medidores/levantamientos"
 )
 
-COLUMNAS_LEV = """
-    fid, "medidorId", serie, toma, domicilio, colonia, latitud, longitud, "precisionGps", 
-    "ajusteManual", observaciones, "usuarioNombre", "fechaRegistro", "fechaModificacion", 
-    activo, "Predio_Viv", "Latitud", "Longitud", "_Ultima_actualizacion",
-    ST_X(geom) as coord_x, ST_Y(geom) as coord_y,
-    ST_X(geom_ant) as coord_ant_x, ST_Y(geom_ant) as coord_ant_y
-"""
 
-# 08 -------------------------------------------------------------------------------------- EDITAR Y ELIMINAR ----------------------------------------------------------------------------------------------
+def obtener_motor_postgres():
+  pg = st.secrets["postgres"]
+  connection_string = f"postgresql+psycopg2://{pg['user']}:{pg['password']}@{pg['host']}:{pg['port']}/{pg['database']}"
+  return create_engine(connection_string)
 
-df_lev = pd.DataFrame()
-row_first = None
 
-if st.session_state.active_tab == "⚙️ Editar":
-  busqueda_edit = st.session_state.get("busqueda_edit_val", "")
+def obtener_total_registros_levantamientos_db():
+  try:
+    engine_pg = obtener_motor_postgres()
+    with engine_pg.connect() as conn:
+      result = conn.execute(text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"'))
+      return result.scalar()
+  except Exception as e:
+    agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
+    return 0
 
-  if busqueda_edit and busqueda_edit.strip() != "":
-    filtro_ed = f"%{busqueda_edit.strip()}%"
-    query_edit = f"""
-            SELECT {COLUMNAS_LEV} 
-            FROM "Usuarios"."levantamientos" 
-            WHERE "medidorId" ILIKE :filtro 
-               OR serie ILIKE :filtro 
-               OR CAST(toma AS TEXT) ILIKE :filtro
-               OR domicilio ILIKE :filtro 
-               OR colonia ILIKE :filtro 
-            ORDER BY fid
-            LIMIT 1
-        """
-    df_lev, error_db = obtener_datos(query_edit, {"filtro": filtro_ed})
-  else:
-    query = (
-        f'SELECT {COLUMNAS_LEV} FROM "Usuarios"."levantamientos" ORDER BY fid LIMIT 1'
+
+@st.cache_data(ttl=300)
+def obtener_token_api():
+  usuario = st.secrets["api"]["usuario"]
+  password = st.secrets["api"]["password"]
+  url_login = BASE_URL + URL_LOGIN_CORRECTA
+
+  for _ in range(3):
+    try:
+      res_login = requests.post(
+          url_login,
+          json={"username": usuario, "password": password},
+          headers={"Content-Type": "application/json"},
+          timeout=15,
+      )
+      if res_login.status_code == 200:
+        data_login = res_login.json()
+        token = data_login.get("token") or data_login.get("access_token")
+        if token:
+          return token
+      time.sleep(2)
+    except Exception:
+      time.sleep(2)
+  return None
+
+
+def convertir_latlon_a_utm_wkt(lat, lon):
+  try:
+    if pd.isna(lat) or pd.isna(lon):
+      return None
+    lat_f = float(lat)
+    lon_f = float(lon)
+    if lat_f == 0.0 or lon_f == 0.0:
+      return None
+
+    try:
+      from pyproj import Transformer
+
+      transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
+      x, y = transformer.transform(lon_f, lat_f)
+      return f"POINT({x:.4f} {y:.4f})"
+    except ImportError:
+      a = 6378137.0
+      eccSquared = 0.00669438
+      k0 = 0.9996
+
+      latRad = math.radians(lat_f)
+      lonRad = math.radians(lon_f)
+
+      zoneNumber = 13
+      lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
+      lonOriginRad = math.radians(lonOrigin)
+
+      e2 = eccSquared / (1 - eccSquared)
+      N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
+      T = math.tan(latRad) ** 2
+      C = e2 * math.cos(latRad) ** 2
+      A = math.cos(latRad) * (lonRad - lonOriginRad)
+
+      M = a * (
+          (
+              1
+              - eccSquared / 4
+              - 3 * eccSquared**2 / 64
+              - 5 * eccSquared**3 / 256
+          )
+          * latRad
+          - (
+              3 * eccSquared / 8
+              + 3 * eccSquared**2 / 32
+              + 45 * eccSquared**3 / 1024
+          )
+          * math.sin(2 * latRad)
+          + (15 * eccSquared**2 / 256 + 45 * eccSquared**3 / 1024)
+          * math.sin(4 * latRad)
+          - (35 * eccSquared**3 / 3072) * math.sin(6 * latRad)
+      )
+
+      x = (
+          k0
+          * N
+          * (
+              A
+              + (1 - T + C) * A**3 / 6
+              + (5 - 18 * T + T**2 + 72 * C - 58 * e2) * A**5 / 120
+          )
+          + 500000.0
+      )
+      y = (
+          k0
+          * (
+              M
+              + N
+              * math.tan(latRad)
+              * (
+                  A**2 / 2
+                  + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
+                  + (61 - 58 * T + T**2 + 600 * C - 330 * e2) * A**6 / 720
+              )
+          )
+      )
+
+      return f"POINT({x:.4f} {y:.4f})"
+  except Exception:
+    return None
+
+
+@st.cache_data(ttl=300)
+def consultar_api_levantamientos_todos(size_lote=200):
+  token = obtener_token_api()
+  if not token:
+    agregar_log(
+        "❌ [API ERROR] No se pudo autenticar para consultar Levantamientos."
     )
-    df_lev, error_db = obtener_datos(query)
+    return pd.DataFrame()
 
-  col_search, col_info, col_msg = st.columns([2.5, 1.5, 2], vertical_alignment="center")
+  todos_los_registros = []
+  page = 0
+  max_paginas = 200
 
-  with col_search:
-    st.text_input(
-        "🔍 Buscar predio a editar (Medidor ID, Serie, Toma, Domicilio, Colonia):",
-        placeholder="Ej. MED-001, Centro...",
-        key="busqueda_edit_val",
+  while page < max_paginas:
+    params = [
+        ("page", page),
+        ("size", size_lote),
+        ("sort", "serie,asc"),
+        ("sort", "predio,asc"),
+    ]
+
+    try:
+      res = requests.get(
+          URL_LEVANTAMIENTOS,
+          headers={
+              "Content-Type": "application/json",
+              "Authorization": f"Bearer {token}",
+          },
+          params=params,
+          timeout=30,
+      )
+
+      if res.status_code != 200:
+        break
+
+      data = res.json()
+      lote_df = pd.DataFrame()
+
+      if isinstance(data, list):
+        lote_df = pd.DataFrame(data)
+      elif isinstance(data, dict):
+        for key in ["content", "data", "result", "items", "levantamientos"]:
+          if key in data and isinstance(data[key], list):
+            lote_df = pd.DataFrame(data[key])
+            break
+        if lote_df.empty:
+          lote_df = pd.DataFrame([data])
+
+      if lote_df.empty:
+        break
+
+      todos_los_registros.append(lote_df)
+      if len(lote_df) < size_lote:
+        break
+
+      page += 1
+    except Exception:
+      break
+
+  if not todos_los_registros:
+    return pd.DataFrame()
+
+  df_final = pd.concat(todos_los_registros, ignore_index=True)
+
+  if not df_final.empty:
+    col_api_predio = next(
+        (
+            c
+            for c in ["predio", "predioViv", "predio_viv", "numeroPredio"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+    col_api_unidad = next(
+        (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df_final.columns),
+        None,
     )
 
-  if error_db:
-    st.error(f"Error: {error_db}")
-  elif not df_lev.empty:
-    row_first = df_lev.iloc[0]
+    def construir_predio_viv(row):
+      if not col_api_predio:
+        return ""
+      p = row[col_api_predio]
+      if pd.isna(p) or str(p).strip().lower() in ["none", "nan", ""]:
+        return ""
+      p_str = str(p).strip()
+      u = (
+          row[col_api_unidad]
+          if col_api_unidad and pd.notna(row[col_api_unidad])
+          else 0
+      )
+      u_str = str(u).strip()
+      if u_str.lower() in ["none", "nan", ""]:
+        u_str = "0"
+      return f"{p_str}-{u_str}"
 
-    with col_info:
-      st.markdown(
-          f"<div style='margin-top: 15px;'><span style='color: #00E5FF; font-weight: bold;'>FID: {row_first['fid']}</span> | "
-          f"<span style='color: #F8FAFC; font-weight: bold;'>Medidor ID: {row_first['medidorId']}</span></div>",
-          unsafe_allow_html=True,
+    df_final["Predio_Viv"] = df_final.apply(construir_predio_viv, axis=1)
+
+    col_lat = next(
+        (
+            c
+            for c in ["latitud", "lat", "latitude", "y", "Latitud"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+    col_lon = next(
+        (
+            c
+            for c in ["longitud", "lon", "lng", "longitude", "x", "Longitud"]
+            if c in df_final.columns
+        ),
+        None,
+    )
+
+    if col_lat and col_lon:
+      df_final["Latitud"] = pd.to_numeric(df_final[col_lat], errors="coerce")
+      df_final["Longitud"] = pd.to_numeric(df_final[col_lon], errors="coerce")
+      df_final["geom"] = df_final.apply(
+          lambda r: convertir_latlon_a_utm_wkt(r["Latitud"], r["Longitud"]),
+          axis=1,
+      )
+    else:
+      df_final["Latitud"] = None
+      df_final["Longitud"] = None
+      df_final["geom"] = None
+
+    if "id" in df_final.columns and "medidorId" not in df_final.columns:
+      df_final["medidorId"] = df_final["id"]
+
+    columnas_a_remover = [
+        "uuid",
+        "predio",
+        "unidad",
+        "usuarioId",
+        "id",
+        "_Ultima_actualizacion",
+    ]
+    df_final = df_final.drop(columns=columnas_a_remover, errors="ignore")
+
+    df_final.insert(0, "fid", range(1, len(df_final) + 1))
+    df_final["_Ultima_actualizacion"] = datetime.now(ZONA_MEXICO)
+
+  return df_final
+
+
+# ==========================================
+# 4. FUNCIÓN DE SINCRONIZACIÓN INCREMENTAL (SIN ACTUALIZAR EXISTENTES)
+# ==========================================
+def ejecutar_sincronizacion_levantamientos(
+    barra_progreso_placeholder=None,
+    texto_estado_placeholder=None,
+    consola_placeholder=None,
+):
+  def actualizar_progreso(valor_pct, mensaje):
+    agregar_log(mensaje)
+    if consola_placeholder is not None:
+      logs_html = "<br>".join(st.session_state.logs)
+      consola_placeholder.markdown(
+          f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+      )
+    if barra_progreso_placeholder is not None:
+      barra_progreso_placeholder.progress(
+          valor_pct, text=f"Sincronizando: {int(valor_pct * 100)}% - {mensaje}"
+      )
+    if texto_estado_placeholder is not None:
+      texto_estado_placeholder.markdown(
+          f"🔄 **{mensaje}** ({int(valor_pct * 100)}%)"
       )
 
-    with col_msg:
-      msg_texto = (
-          "Mostrando la primera coincidencia encontrada."
-          if (busqueda_edit and busqueda_edit.strip() != "")
-          else "Mostrando el primer registro de la base de datos."
+  actualizar_progreso(
+      0.30, "[PASO 1/2] Descargando registros de la API y calculando UTM..."
+  )
+  df_lev = consultar_api_levantamientos_todos(size_lote=200)
+
+  if df_lev.empty:
+    actualizar_progreso(
+        1.0, "[ERROR] No se pudo obtener respuesta o datos del endpoint."
+    )
+    return False
+
+  total_descargados = len(df_lev)
+  actualizar_progreso(
+      0.60,
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando solo nuevos (sin tocar los existentes)...",
+  )
+
+  try:
+    engine_pg = obtener_motor_postgres()
+
+    # 1. Cargamos los datos a una tabla temporal en PostgreSQL
+    temp_table_name = "tmp_levantamientos_sync"
+    df_lev.to_sql(
+        temp_table_name,
+        con=engine_pg,
+        schema="Usuarios",
+        if_exists="replace",
+        index=False,
+        chunksize=5000,
+    )
+
+    # 2. Obtenemos las columnas de la tabla temporal excepto 'fid'
+    with engine_pg.connect() as conn:
+      cols_result = conn.execute(
+          text(f"""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema = 'Usuarios' 
+                  AND table_name = '{temp_table_name}'
+                  AND column_name != 'fid'
+            """)
       )
-      st.markdown(
-          f"<p style='color: #94A3B8; font-size: 0.85rem; margin-top: 20px; margin-bottom: 0px;'>{msg_texto}</p>",
-          unsafe_allow_html=True,
-      )
+      columnas = [row[0] for row in cols_result]
 
-    for idx, row in df_lev.iterrows():
-      default_x = float(row["coord_x"]) if pd.notna(row["coord_x"]) else 0.0
-      default_y = float(row["coord_y"]) if pd.notna(row["coord_y"]) else 0.0
+    cols_str = ", ".join([f'"{c}"' for c in columnas])
+    cols_t_str = ", ".join([f't."{c}"' for c in columnas])
 
-      default_ant_x = float(row["coord_ant_x"]) if pd.notna(row["coord_ant_x"]) else 0.0
-      default_ant_y = float(row["coord_ant_y"]) if pd.notna(row["coord_ant_y"]) else 0.0
+    # 3. Inserción estricta: Solo inserta si la serie NO existe previamente. Los existentes se ignoran intactos.
+    query_insert_nuevos = text(f"""
+        INSERT INTO "Usuarios"."levantamientos" ("fid", {cols_str})
+        SELECT 
+            (SELECT COALESCE(MAX(fid), 0) FROM "Usuarios"."levantamientos") + ROW_NUMBER() OVER () AS fid,
+            {cols_t_str}
+        FROM "Usuarios"."{temp_table_name}" t
+        WHERE t.serie IS NOT NULL 
+          AND TRIM(CAST(t.serie AS TEXT)) NOT IN ('', 'None', 'nan', 'NULL', 'null')
+          AND NOT EXISTS (
+              SELECT 1 FROM "Usuarios"."levantamientos" l 
+              WHERE LOWER(TRIM(CAST(l.serie AS TEXT))) = LOWER(TRIM(CAST(t.serie AS TEXT)))
+          );
+    """)
 
-      x_key = f"coord_x_input_{row['fid']}"
-      y_key = f"coord_y_input_{row['fid']}"
-      ant_x_key = f"coord_ant_x_input_{row['fid']}"
-      ant_y_key = f"coord_ant_y_input_{row['fid']}"
-      ajust_key = f"ajust_{row['fid']}"
+    with engine_pg.begin() as conn:
+      conn.execute(query_insert_nuevos)
+      conn.execute(text(f'DROP TABLE IF EXISTS "Usuarios"."{temp_table_name}"'))
 
-      if x_key not in st.session_state:
-        st.session_state[x_key] = default_x
-      if y_key not in st.session_state:
-        st.session_state[y_key] = default_y
-      if ant_x_key not in st.session_state:
-        st.session_state[ant_x_key] = default_ant_x
-      if ant_y_key not in st.session_state:
-        st.session_state[ant_y_key] = default_ant_y
-      if ajust_key not in st.session_state:
-        st.session_state[ajust_key] = bool(row["ajusteManual"])
-
-      map_key = f"map_edit_preview_{row['fid']}"
-      if map_key in st.session_state and st.session_state[map_key] and st.session_state[map_key].get("last_clicked"):
-        clicked_data = st.session_state[map_key]["last_clicked"]
-        lat_c = clicked_data["lat"]
-        lon_c = clicked_data["lng"]
-        utm_x, utm_y = transformer_to_utm.transform(lon_c, lat_c)
-        new_x = round(utm_x, 2)
-        new_y = round(utm_y, 3)
-        if st.session_state[x_key] != new_x or st.session_state[y_key] != new_y:
-          st.session_state[ant_x_key] = st.session_state[x_key]
-          st.session_state[ant_y_key] = st.session_state[y_key]
-          st.session_state[x_key] = new_x
-          st.session_state[y_key] = new_y
-          st.session_state[ajust_key] = True
-
-      col_inputs_left, col_map_right = st.columns([1.1, 1.2], gap="large")
-
-      with col_inputs_left:
-        ic1, ic2 = st.columns(2)
-        with ic1:
-          st.text_input(
-              "FID",
-              value=str(row["fid"] or 0),
-              disabled=True,
-              key=f"fid_bloq_{row['fid']}",
-          )
-          st.text_input(
-              "Serie",
-              value=str(row["serie"] or ""),
-              key=f"ser_{row['fid']}",
-          )
-          st.text_input(
-              "Domicilio", value=str(row["domicilio"] or ""), key=f"dom_{row['fid']}"
-          )
-          st.number_input(
-              "Latitud",
-              format="%.6f",
-              value=float(row["latitud"] or 21.8853),
-              key=f"lat_{row['fid']}",
-          )
-          st.number_input(
-              "Precisión GPS",
-              value=float(row["precisionGps"] or 0.0),
-              key=f"prec_{row['fid']}",
-          )
-          st.checkbox(
-              "Activo",
-              value=bool(row["activo"]),
-              key=f"act_{row['fid']}",
-          )
-          st.number_input(
-              "Coordenada X",
-              format="%.2f",
-              key=x_key,
-          )
-          st.number_input(
-              "Coordenada X Anterior",
-              format="%.2f",
-              key=ant_x_key,
-          )
-
-        with ic2:
-          st.text_input(
-              "Medidor ID", value=str(row["medidorId"] or ""), key=f"medid_{row['fid']}"
-          )
-          st.number_input(
-              "Toma",
-              value=int(row["toma"] or 0),
-              key=f"tom_{row['fid']}",
-          )
-          st.text_input(
-              "Colonia",
-              value=str(row["colonia"] or ""),
-              key=f"col_{row['fid']}",
-          )
-          st.number_input(
-              "Longitud",
-              format="%.6f",
-              value=float(row["longitud"] or -102.2916),
-              key=f"lon_{row['fid']}",
-          )
-          st.checkbox(
-              "Ajuste Manual",
-              key=ajust_key,
-          )
-          st.text_input(
-              "Predio_Viv",
-              value=str(row["Predio_Viv"] or ""),
-              key=f"pviv_{row['fid']}",
-          )
-          st.number_input(
-              "Coordenada Y",
-              format="%.3f",
-              key=y_key,
-          )
-          st.number_input(
-              "Coordenada Y Anterior",
-              format="%.3f",
-              key=ant_y_key,
-          )
-
-        st.text_area(
-            "Observaciones",
-            value=str(row["observaciones"] or ""),
-            key=f"obs_{row['fid']}",
-        )
-
-      with col_map_right:
-        st.markdown(
-            "<p style='color: #00E5FF; font-size: 0.85rem; font-weight: 700;"
-            " margin-top: 0px;'>🗺️ Ubicación Geográfica (geom) - Haga clic en el"
-            " mapa para actualizar coordenadas automáticamente</p>",
-            unsafe_allow_html=True,
-        )
-        try:
-          if (
-              st.session_state[x_key] != 0.0
-              and st.session_state[y_key] != 0.0
-          ):
-            lon_ed, lat_ed = transformer_to_latlon.transform(
-                st.session_state[x_key], st.session_state[y_key]
-            )
-            m_ed = folium.Map(
-                location=[lat_ed, lon_ed], zoom_start=17, control_scale=True
-            )
-          else:
-            m_ed = folium.Map(
-                location=[21.8853, -102.2916], zoom_start=12, control_scale=True
-            )
-
-          agregar_capas_base_mapa(m_ed)
-          Fullscreen().add_to(m_ed)
-
-          if (
-              st.session_state[x_key] != 0.0
-              and st.session_state[y_key] != 0.0
-          ):
-            folium.Marker(
-                location=[lat_ed, lon_ed],
-                popup=f"Predio: {row['medidorId']}",
-                icon=folium.Icon(color="cyan", icon="info-sign"),
-            ).add_to(m_ed)
-
-          folium.LayerControl(collapsed=False).add_to(m_ed)
-          
-          st_folium(
-              m_ed,
-              width="100%",
-              height=540,
-              key=map_key,
-              returned_objects=["last_clicked"],
-          )
-
-        except Exception as e_map_ed:
-          st.info(
-              "Haga clic en el mapa para actualizar la posición geográfica."
-              f" ({e_map_ed})"
-          )
-  else:
-    st.info("No se encontró ningún registro para editar.")
+    actualizar_progreso(
+        1.0,
+        f"🎉 [CICLO EXITOSO] Sincronización completada."
+        f" Se evaluaron {total_descargados:,} registros. Los existentes se respetaron intactos.",
+    )
+    return True
+  except Exception as ex:
+    actualizar_progreso(
+        1.0, f"[ERROR CRÍTICO] Falló la sincronización en base de datos: {ex}"
+    )
+    return False
 
 
-# 06 SECCION ------------------------------------------------------------ BARRA LATERAL IZQUIERDA (SIDEBAR) --------------------------------------------------------------------------------------------------------
+# ==========================================
+# 5. TEMPORIZADOR Y RELOJ (HORA MÉXICO)
+# ==========================================
+def calcular_siguiente_tiempo_reloj(minutos_intervalo):
+  ahora = datetime.now(ZONA_MEXICO)
+  minuto_actual = ahora.minute
+  segundo_actual = ahora.second
+  residuo = minuto_actual % minutos_intervalo
+  minutos_faltantes = (
+      minutos_intervalo - residuo
+      if residuo != 0
+      else (0 if segundo_actual == 0 else minutos_intervalo)
+  )
+  if minutos_faltantes == 0 and segundo_actual > 0:
+    minutos_faltantes = minutos_intervalo
+  siguiente_tiempo = (
+      ahora.replace(second=0, microsecond=0)
+      + timedelta(minutes=minutos_faltantes)
+  )
+  total_segundos_hasta_siguiente = (
+      siguiente_tiempo - ahora
+  ).total_seconds()
+  return siguiente_tiempo, int(total_segundos_hasta_siguiente)
+
+
+if "is_running" not in st.session_state:
+  st.session_state.is_running = False
+if "next_run_time" not in st.session_state:
+  st.session_state.next_run_time = None
+if "intervalo_minutos_sel" not in st.session_state:
+  st.session_state.intervalo_minutos_sel = 5
+
+# ==========================================
+# 6. CARGA DE DATOS PARA INDICADORES Y VISTAS
+# ==========================================
+total_registros_db = obtener_total_registros_levantamientos_db()
+df_lev_preview = consultar_api_levantamientos_todos(size_lote=200)
+
+total_serie_api_lev = 0
+if not df_lev_preview.empty:
+  if "serie" in df_lev_preview.columns:
+    ts = df_lev_preview["serie"].dropna().astype(str).str.strip()
+    total_serie_api_lev = ts[
+        ~ts.str.lower().isin(["", "none", "nan", "null"])
+    ].count()
+
+# ==========================================
+# 7. BARRA LATERAL IZQUIERDA (SIDEBAR)
+# ==========================================
 with st.sidebar:
-
-  st.markdown(
-      """
-        <div style="text-align: center; margin-top: -35px; padding-top: 0px; padding-bottom: 8px; border-bottom: 1px solid rgba(0, 229, 255, 0.15); margin-bottom: 12px;">
-            <img src="https://raw.githubusercontent.com/Miaa-Aguascalientes/Logos/38504978c8f77a4dac38ad476f74dbdee6af2cad/LogoMIAA.svg" style="width: 140px; margin-bottom: 0px;" />
-        </div>
-    """,
-      unsafe_allow_html=True,
+  st.image(
+      "https://raw.githubusercontent.com/Miaa-Aguascalientes/Logos/38504978c8f77a4dac38ad476f74dbdee6af2cad/LogoMIAA.svg",
+      use_container_width=True,
   )
+  st.markdown("### 🚰 Panel Levantamientos MIAA")
+  st.markdown("---")
+  st.markdown("#### ⚙ Configuración")
 
-  st.markdown(
-      f"""
-        <div style="background: #111A30; border: 1px solid rgba(0, 229, 255, 0.15); border-radius: 8px; padding: 12px; text-align: center; margin-bottom: 15px;">
-            <div style="color: #00E5FF; font-weight: 700; font-size: 0.9rem; margin-bottom: 4px;">👤 {st.session_state.usuario_actual}</div>
-            <div style="color: #94A3B8; font-size: 0.75rem; text-transform: uppercase;">{st.session_state.get('tipo_usuario', 'usuario')}</div>
-        </div>
-    """,
-      unsafe_allow_html=True,
+  opciones_intervalo = {
+      "Cada 1 minuto": 1,
+      "Cada 5 minutos": 5,
+      "Cada 10 minutos": 10,
+      "Cada 15 minutos": 15,
+      "Cada 30 minutos": 30,
+      "Cada hora": 60,
+  }
+  intervalo_sel = st.selectbox(
+      "Intervalo de sincronización", list(opciones_intervalo.keys())
   )
+  minutos_seleccionados = opciones_intervalo[intervalo_sel]
 
-  opciones_menu = ["⚙️ Editar", "🛠️ Ajustes Manuales", "⚠️ Series Duplicadas"]
+  col_s1, col_s2 = st.columns(2)
+  with col_s1:
+    btn_iniciar = st.button("INICIAR", type="primary", use_container_width=True)
+  with col_s2:
+    btn_parar = st.button("PARAR", type="secondary", use_container_width=True)
 
-  if (
-      "active_tab" not in st.session_state
-      or st.session_state.active_tab not in opciones_menu
-  ):
-    st.session_state.active_tab = opciones_menu[0]
-
-  st.markdown(
-      "<p style='color: #64748B; font-size: 0.75rem; font-weight: 700;"
-      " text-transform: uppercase; margin-bottom: 8px;'>Navegación</p>",
-      unsafe_allow_html=True,
-  )
-
-  for opcion in opciones_menu:
-    es_activa = st.session_state.active_tab == opcion
-    tipo_btn = "primary" if es_activa else "secondary"
-
-    if st.button(
-        opcion,
-        key=f"nav_{opcion}",
-        use_container_width=True,
-        type=tipo_btn,
-    ):
-      if st.session_state.active_tab != opcion:
-        st.session_state.active_tab = opcion
-        st.rerun()
-
-  if st.session_state.active_tab == "⚙️ Editar" and not df_lev.empty and row_first is not None:
-    st.markdown(
-        "<hr style='border: 0.5px solid rgba(0,229,255,0.2); margin: 15px 0;'>",
-        unsafe_allow_html=True,
+  if btn_iniciar:
+    st.session_state.is_running = True
+    st.session_state.intervalo_minutos_sel = minutos_seleccionados
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(minutos_seleccionados)
+    st.session_state.next_run_time = sig_tiempo
+    agregar_log(
+        f"▶ Temporizador activado. Próxima ejecución a las"
+        f" {sig_tiempo.strftime('%H:%M:%S')} (Hora Centro de México)."
     )
-    st.markdown(
-        "<p style='color: #00E5FF; font-size: 0.85rem; font-weight: 700;"
-        " margin-bottom: 10px;'>💾 Acciones de Registro</p>",
-        unsafe_allow_html=True,
-    )
+    st.rerun()
 
-    if st.button("💾 Actualizar Registro", key="btn_act_sidebar", use_container_width=True):
-      try:
-        e_fid = int(row_first["fid"])
-        default_x = float(row_first["coord_x"]) if pd.notna(row_first["coord_x"]) else 0.0
-        default_y = float(row_first["coord_y"]) if pd.notna(row_first["coord_y"]) else 0.0
+  if btn_parar:
+    st.session_state.is_running = False
+    st.session_state.next_run_time = None
+    agregar_log("⏹ Temporizador detenido manualmente.")
+    st.rerun()
 
-        x_key = f"coord_x_input_{e_fid}"
-        y_key = f"coord_y_input_{e_fid}"
-        ant_x_key = f"coord_ant_x_input_{e_fid}"
-        ant_y_key = f"coord_ant_y_input_{e_fid}"
-        ajust_key = f"ajust_{e_fid}"
-
-        fecha_mod_str = datetime.datetime.now(zona_mx).strftime("%Y-%m-%d %H:%M:%S")
-        
-        nuevo_x = float(st.session_state.get(x_key, default_x))
-        nuevo_y = float(st.session_state.get(y_key, default_y))
-        nuevo_ant_x = float(st.session_state.get(ant_x_key, 0.0))
-        nuevo_ant_y = float(st.session_state.get(ant_y_key, 0.0))
-        
-        hubo_cambio_coord = (nuevo_x != default_x) or (nuevo_y != default_y)
-        
-        sql_update = """
-                      UPDATE "Usuarios"."levantamientos" 
-                      SET "medidorId" = :medidorId, serie = :serie, toma = :toma, 
-                          domicilio = :domicilio, colonia = :colonia, latitud = :latitud, 
-                          longitud = :longitud, "precisionGps" = :precisionGps, 
-                          "ajusteManual" = :ajusteManual, observaciones = :observaciones, 
-                          activo = :activo, "Predio_Viv" = :Predio_Viv, 
-                          "Latitud" = :Latitud, "Longitud" = :Longitud, 
-                          "fechaModificacion" = :fechaModificacion, 
-                          {geom_ant_sql}
-                          geom = ST_SetSRID(ST_MakePoint(:coord_x, :coord_y), 32613)
-                      WHERE fid = :fid
-                  """.format(
-                      geom_ant_sql='geom_ant = ST_SetSRID(ST_MakePoint(:coord_ant_x, :coord_ant_y), 32613),' if hubo_cambio_coord else ''
-                  )
-
-        params_sql = {
-            "fid": e_fid,
-            "medidorId": st.session_state.get(f"medid_{e_fid}", str(row_first["medidorId"] or "")).strip(),
-            "serie": st.session_state.get(f"ser_{e_fid}", str(row_first["serie"] or "")) or None,
-            "toma": int(st.session_state.get(f"tom_{e_fid}", int(row_first["toma"] or 0))),
-            "domicilio": st.session_state.get(f"dom_{e_fid}", str(row_first["domicilio"] or "")) or None,
-            "colonia": st.session_state.get(f"col_{e_fid}", str(row_first["colonia"] or "")) or None,
-            "latitud": float(st.session_state.get(f"lat_{e_fid}", float(row_first["latitud"] or 21.8853))),
-            "longitud": float(st.session_state.get(f"lon_{e_fid}", float(row_first["longitud"] or -102.2916))),
-            "precisionGps": float(st.session_state.get(f"prec_{e_fid}", float(row_first["precisionGps"] or 0.0))),
-            "ajusteManual": bool(st.session_state.get(ajust_key, bool(row_first["ajusteManual"]))),
-            "observaciones": st.session_state.get(f"obs_{e_fid}", str(row_first["observaciones"] or "")) or None,
-            "activo": bool(st.session_state.get(f"act_{e_fid}", bool(row_first["activo"]))),
-            "Predio_Viv": st.session_state.get(f"pviv_{e_fid}", str(row_first["Predio_Viv"] or "")) or None,
-            "Latitud": float(st.session_state.get(f"lat_{e_fid}", float(row_first["latitud"] or 21.8853))),
-            "Longitud": float(st.session_state.get(f"lon_{e_fid}", float(row_first["longitud"] or -102.2916))),
-            "fechaModificacion": fecha_mod_str,
-            "coord_x": nuevo_x,
-            "coord_y": nuevo_y,
-        }
-        if hubo_cambio_coord:
-          params_sql["coord_ant_x"] = nuevo_ant_x
-          params_sql["coord_ant_y"] = nuevo_ant_y
-
-        ejecutar_sql(sql_update, params_sql)
-
-        for k in [x_key, y_key, ant_x_key, ant_y_key, ajust_key, f"map_edit_preview_{e_fid}"]:
-          if k in st.session_state:
-            del st.session_state[k]
-
-        st.success(f"¡Predio FID {e_fid} actualizado con éxito!")
-        t.sleep(1)
-        st.rerun()
-      except Exception as ex:
-        st.error(f"Error al actualizar: {ex}")
-
-    if not es_operador:
-      if st.session_state.registro_to_delete == row_first["fid"]:
-        st.markdown(
-            f"<p style='color: #ff4d4d; font-size: 0.8rem; font-weight: bold; margin-top: 8px;'>Escribe 'delete' para confirmar:</p>",
-            unsafe_allow_html=True,
-        )
-        confirm_text = st.text_input("Confirmación", key=f"input_del_sidebar_{row_first['fid']}")
-        c_y, c_n = st.columns(2)
-        with c_y:
-          if st.button("Sí, borrar", key="btn_yes_del", use_container_width=True):
-            if confirm_text.strip() == "delete":
-              try:
-                ejecutar_sql('DELETE FROM "Usuarios"."levantamientos" WHERE fid = :fid', {"fid": int(row_first["fid"])})
-                st.session_state.registro_to_delete = None
-                st.success("Registro eliminado.")
-                t.sleep(1)
-                st.rerun()
-              except Exception as ex_del:
-                st.error(f"Error: {ex_del}")
-            else:
-              st.error("Escribe 'delete'.")
-        with c_n:
-          if st.button("Cancelar", key="btn_cancel_del", use_container_width=True):
-            st.session_state.registro_to_delete = None
-            st.rerun()
-      else:
-        if st.button("🗑️ Eliminar Registro", key="btn_del_sidebar", use_container_width=True):
-          st.session_state.registro_to_delete = row_first["fid"]
-          st.rerun()
-
-  st.markdown(
-      "<hr style='border: 0.5px solid rgba(0,229,255,0.2); margin: 15px 0;'>",
-      unsafe_allow_html=True,
-  )
-
-  df_sidebar_levantamientos, _ = obtener_datos(
-      'SELECT fid, "medidorId", serie, domicilio, colonia, activo FROM "Usuarios"."levantamientos"'
-  )
-
-  if not df_sidebar_levantamientos.empty:
-    st.markdown(
-        "<p style='color: #00E5FF; font-size: 0.85rem; font-weight: 700;"
-        " margin-bottom: 16px; margin-top: 8px;'>📊 Resumen Predios</p>",
-        unsafe_allow_html=True,
-    )
-
-    total_predios = len(df_sidebar_levantamientos)
-    activos_count = len(df_sidebar_levantamientos[df_sidebar_levantamientos["activo"] == True])
-    inactivos_count = total_predios - activos_count
-
-    st.markdown(
-        f"""
-        <div style="font-size: 0.80rem; color: #94A3B8; line-height: 1.6;">
-            <b>Total Registrados:</b> <span style="color: #00E5FF;">{total_predios}</span><br>
-            <b>Activos:</b> <span style="color: #2ECC71;">{activos_count}</span><br>
-            <b>Inactivos:</b> <span style="color: #E74C3C;">{inactivos_count}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+  st.markdown("---")
+  if st.button("🔄 Actualizar Métricas de BD", use_container_width=True):
+    st.rerun()
 
   # ==========================================
   # BOTÓN DE BORRADO TOTAL DE LA TABLA
   # ==========================================
-  st.markdown(
-      "<hr style='border: 0.5px solid rgba(0,229,255,0.2); margin: 15px 0;'>",
-      unsafe_allow_html=True,
-  )
-  st.markdown(
-      "<p style='color: #EF4444; font-size: 0.85rem; font-weight: 700; margin-bottom: 8px;'>⚠️ Zona de Peligro</p>",
-      unsafe_allow_html=True,
-  )
+  st.markdown("---")
+  st.markdown("#### ⚠️ Zona de Peligro")
 
   if not st.session_state.confirmar_borrado_total:
-    if st.button("🗑️ Vaciar Tabla Completa", key="btn_vaciar_total", use_container_width=True):
+    if st.button("🗑️ Vaciar Tabla Levantamientos", type="secondary", use_container_width=True):
       st.session_state.confirmar_borrado_total = True
       st.rerun()
   else:
-    st.warning("¿Estás 100% seguro? Se borrarán TODOS los registros de la tabla.")
-    col_bt1, col_bt2 = st.columns(2)
-    with col_bt1:
-      if st.button("Sí, vaciar", key="btn_si_vaciar", use_container_width=True):
+    st.warning("¿Estás seguro? Se borrarán TODOS los registros.")
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+      if st.button("Sí, vaciar", type="primary", use_container_width=True, key="btn_si_vaciar"):
         try:
-          ejecutar_sql('TRUNCATE TABLE "Usuarios"."levantamientos"')
+          engine_pg = obtener_motor_postgres()
+          with engine_pg.begin() as conn:
+            conn.execute(text('TRUNCATE TABLE "Usuarios"."levantamientos"'))
+          agregar_log("🗑️ [TABLA VACIADA] Se eliminaron todos los registros.")
           st.success("¡Tabla vaciada correctamente!")
-          st.session_state.confirmar_borrado_total = False
-          t.sleep(1)
-          st.rerun()
-        except Exception as ex_vac:
-          st.error(f"Error al vaciar: {ex_vac}")
-    with col_bt2:
-      if st.button("Cancelar", key="btn_no_vaciar", use_container_width=True):
+        except Exception as ex:
+          agregar_log(f"❌ [ERROR AL VACIAR]: {ex}")
+          st.error(f"Error: {ex}")
+
+        st.session_state.confirmar_borrado_total = False
+        time.sleep(1)
+        st.rerun()
+    with col_b2:
+      if st.button("Cancelar", type="secondary", use_container_width=True, key="btn_no_vaciar"):
         st.session_state.confirmar_borrado_total = False
         st.rerun()
 
-  st.markdown("<br>", unsafe_allow_html=True)
-
-  if st.button("Cerrar Sesión", key="btn_logout", use_container_width=True):
-    st.session_state.autenticado = False
-    st.session_state.gestor_bd_autenticado = False
-    st.rerun()
-
-
-# 09 ----------------------------------------------------------------------------------- ZONA: AJUSTES MANUALES ---------------------------------------------------------------------------------------------
-if st.session_state.active_tab == "🛠️ Ajustes Manuales":
-  st.markdown(
-      """
-      <div style="margin-bottom: 20px;">
-          <h2 style="color: #00E5FF; font-size: 1.4rem; font-weight: 700; margin-bottom: 5px;">🛠️ Registros con Ajuste Manual</h2>
-          <p style="color: #94A3B8; font-size: 0.9rem;">Listado completo de predios que han sido modificados o ajustados manualmente.</p>
-      </div>
-      """,
-      unsafe_allow_html=True,
-  )
-
-  query_manuales = f"""
-        SELECT {COLUMNAS_LEV} 
-        FROM "Usuarios"."levantamientos" 
-        WHERE "ajusteManual" = TRUE 
-        ORDER BY fid
-    """
-  df_manuales, err_man = obtener_datos(query_manuales)
-
-  if err_man:
-    st.error(f"Error al obtener los registros: {err_man}")
-  elif df_manuales.empty:
-    st.info("No se encontró ningún registro con ajuste manual activo.")
-  else:
-    st.success(f"Se encontraron {len(df_manuales)} registros con ajuste manual.")
-    
-    df_mostrar = df_manuales[[
-        "fid", "medidorId", "serie", "toma", "domicilio", "colonia", 
-        "coord_x", "coord_y", "coord_ant_x", "coord_ant_y", "fechaModificacion"
-    ]].copy()
-    
-    df_mostrar = formatear_columnas_fecha(df_mostrar)
-    st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
-
-
-# 10 ----------------------------------------------------------------------------------- ZONA: SERIES DUPLICADAS ---------------------------------------------------------------------------------------------
-elif st.session_state.active_tab == "⚠️ Series Duplicadas":
-  st.markdown(
-      """
-      <div style="margin-bottom: 20px;">
-          <h2 style="color: #00E5FF; font-size: 1.4rem; font-weight: 700; margin-bottom: 5px;">⚠️ Control de Series Duplicadas</h2>
-          <p style="color: #94A3B8; font-size: 0.9rem;">Detección de números de serie repetidos y herramienta para eliminar duplicados dejando solo un registro.</p>
-      </div>
-      """,
-      unsafe_allow_html=True,
-  )
-
-  query_duplicados = """
-        SELECT {cols} 
-        FROM "Usuarios"."levantamientos" 
-        WHERE serie IS NOT NULL AND TRIM(serie) != '' AND serie IN (
-            SELECT serie 
-            FROM "Usuarios"."levantamientos" 
-            WHERE serie IS NOT NULL AND TRIM(serie) != '' 
-            GROUP BY serie 
-            HAVING COUNT(*) > 1
-        )
-        ORDER BY serie, fid
-    """.format(cols=COLUMNAS_LEV)
-
-  df_dups, err_dup = obtener_datos(query_duplicados)
-
-  if err_dup:
-    st.error(f"Error al consultar duplicados: {err_dup}")
-  elif df_dups.empty:
-    st.success("¡Excelente! No hay números de serie duplicados en la base de datos.")
-  else:
-    total_duplicados = len(df_dups)
-    series_unicas = df_dups["serie"].nunique()
-    
-    st.warning(f"Se encontraron **{total_duplicados} registros** distribuidos en **{series_unicas} números de serie** repetidos.")
-
-    col_btn_limpiar, col_info_limp = st.columns([1.5, 3])
-    with col_btn_limpiar:
-      if st.button("🧹 Eliminar Duplicados (Conservar el menor FID)", use_container_width=True):
-        try:
-          sql_delete_dups = """
-                        DELETE FROM "Usuarios"."levantamientos" 
-                        WHERE fid NOT IN (
-                            SELECT MIN(fid) 
-                            FROM "Usuarios"."levantamientos" 
-                            WHERE serie IS NOT NULL AND TRIM(serie) != '' 
-                            GROUP BY serie
-                        ) AND serie IN (
-                            SELECT serie 
-                            FROM "Usuarios"."levantamientos" 
-                            WHERE serie IS NOT NULL AND TRIM(serie) != '' 
-                            GROUP BY serie 
-                            HAVING COUNT(*) > 1
-                        )
-                    """
-          ejecutar_sql(sql_delete_dups)
-          st.success("¡Duplicados eliminados correctamente! Se ha conservado únicamente el registro original (menor FID) por cada serie.")
-          t.sleep(1.5)
-          st.rerun()
-        except Exception as e_del_dup:
-          st.error(f"Error al eliminar duplicados: {e_del_dup}")
-
-    with col_info_limp:
-      st.markdown(
-          "<p style='color: #94A3B8; font-size: 0.85rem; margin-top: 10px;'>"
-          "Nota: Al hacer clic en limpiar, el sistema mantendrá el registro con el <b>FID más bajo</b> de cada serie repetida y borrará los demás."
-          "</p>",
-          unsafe_allow_html=True,
-      )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("<h4 style='color: #00E5FF; font-size: 1.1rem;'>Detalle de Registros Duplicados:</h4>", unsafe_allow_html=True)
-    
-    df_mostrar_dup = df_dups[[
-        "fid", "medidorId", "serie", "toma", "domicilio", "colonia", 
-        "fechaRegistro", "activo"
-    ]].copy()
-    
-    df_mostrar_dup = formatear_columnas_fecha(df_mostrar_dup)
-    st.dataframe(df_mostrar_dup, use_container_width=True, hide_index=True)
-
-
-# 11 -------------------------------------------------------------------------------------- PIE DE PÁGINA --------------------------------------------------------------------------------------------------
+# ==========================================
+# 8. INTERFAZ PRINCIPAL
+# ==========================================
 st.markdown(
     """
-    <div style="text-align: center; color: #94A3B8; font-size: 0.8rem; margin-top: 30px;">
-        MIAA - Sistema de Gestión de Levantamientos de Predios © 2026
+    <div style="text-align: center; margin-top: -20px; margin-bottom: 10px;">
+        <h2 style="color: #f8fafc; font-weight: 700;">MIAA - Módulo de Levantamientos y Sincronización</h2>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+col_ind1, col_ind2, col_ind3 = st.columns(3)
+with col_ind1:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">🎯</div>
+            <div class="metric-content">
+                <div class="metric-title">TOTAL LEVANTAMIENTOS API</div>
+                <div class="metric-value">{len(df_lev_preview):,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+with col_ind2:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">📊</div>
+            <div class="metric-content">
+                <div class="metric-title">TOTAL REGISTROS TABLA LEVANTAMIENTOS (DB)</div>
+                <div class="metric-value">{total_registros_db:,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+with col_ind3:
+  st.markdown(
+      f"""
+        <div class="metric-card">
+            <div style="font-size: 28px; margin-right: 15px;">✅</div>
+            <div class="metric-content">
+                <div class="metric-title">SERIES VÁLIDAS EN API</div>
+                <div class="metric-value">{total_serie_api_lev:,}</div>
+            </div>
+        </div>
+    """,
+      unsafe_allow_html=True,
+  )
+
+st.markdown(
+    "<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True
+)
+
+st.markdown("#### 🔄 Estado y Progreso del Sistema")
+estado_ejecucion_placeholder = st.empty()
+barra_progreso_placeholder = st.empty()
+
+col_consola, col_info = st.columns([1, 1], gap="medium")
+with col_consola:
+  st.markdown("#### 🖥️ Consola de Registros (Tabla Levantamientos)")
+  consola_placeholder = st.empty()
+  logs_html = "<br>".join(st.session_state.logs)
+  consola_placeholder.markdown(
+      f'<div class="terminal-box">{logs_html}</div>', unsafe_allow_html=True
+  )
+
+if st.session_state.is_running and st.session_state.next_run_time:
+  if st.session_state.next_run_time is None:
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
+        st.session_state.intervalo_minutos_sel
+    )
+    st.session_state.next_run_time = sig_tiempo
+
+  ahora = datetime.now(ZONA_MEXICO)
+  if ahora >= st.session_state.next_run_time:
+    ejecutar_sincronizacion_levantamientos(
+        barra_progreso_placeholder,
+        estado_ejecucion_placeholder,
+        consola_placeholder,
+    )
+    sig_tiempo, _ = calcular_siguiente_tiempo_reloj(
+        st.session_state.intervalo_minutos_sel
+    )
+    st.session_state.next_run_time = sig_tiempo
+    st.rerun()
+  else:
+    segundos_totales_intervalo = st.session_state.intervalo_minutos_sel * 60
+    segundos_restantes = max(
+        0,
+        int(
+            (
+                st.session_state.next_run_time
+                - datetime.now(ZONA_MEXICO)
+            ).total_seconds()
+        ),
+    )
+    progreso_espera = max(
+        0.0,
+        min(
+            1.0,
+            1.0 - (segundos_restantes / float(segundos_totales_intervalo)),
+        ),
+    )
+    mins_r = segundos_restantes // 60
+    secs_r = segundos_restantes % 60
+    tiempo_formateado = f"{mins_r:02d}:{secs_r:02d}"
+
+    estado_ejecucion_placeholder.markdown(
+        f"⏳ **Temporizador activo.** Próxima ejecución a las"
+        f" **{st.session_state.next_run_time.strftime('%H:%M:%S')}** (Restan"
+        f" **{tiempo_formateado}**)"
+    )
+    barra_progreso_placeholder.progress(
+        progreso_espera,
+        text=f"Tiempo en espera — Restan {tiempo_formateado}",
+    )
+    time.sleep(1)
+    st.rerun()
+else:
+  estado_ejecucion_placeholder.markdown(
+      "⏸️ **Temporizador inactivo.** Presiona **INICIAR** en la barra lateral."
+  )
+  barra_progreso_placeholder.progress(0, text="Listo para iniciar...")
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+with col_info:
+  st.markdown("#### ℹ️ Información del Módulo")
+  with st.container(border=True):
+    st.markdown(
+        """
+            <h4 style="margin-top: 0; color: #f8fafc; font-size: 18px;">
+                Gestión Exclusiva de la Tabla <code>Usuarios.levantamientos</code>
+            </h4>
+            <p style="font-size: 13px; color: #94a3b8; margin-bottom: 10px;">
+                Este programa apunta directamente al esquema <b>Usuarios</b> y la tabla <b>levantamientos</b> en PostgreSQL con geometría nativa PostGIS <code>geometry(POINT, 32613)</code> y carga incremental inteligente sin sobrescribir ediciones externas.
+            </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+# ==========================================
+# 9. PESTAÑAS DE LA APLICACIÓN
+# ==========================================
+tab1, tab2 = st.tabs([
+    "🚰 Tabla PostgreSQL: Usuarios.levantamientos",
+    "🔍 Explorador API Levantamientos",
+])
+
+with tab1:
+  st.markdown(
+      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
+      " almacenados en la tabla PostgreSQL: <code>Usuarios.levantamientos</code></p>",
+      unsafe_allow_html=True,
+  )
+  if total_registros_db > 0:
+    try:
+      engine_pg = obtener_motor_postgres()
+      t2_filas = 50
+      t2_total_pags = max(
+          1,
+          (total_registros_db // t2_filas)
+          + (1 if total_registros_db % t2_filas > 0 else 0),
+      )
+      t2_pag = st.selectbox(
+          "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
+      )
+      df_t2 = pd.read_sql(
+          text(
+              'SELECT * FROM "Usuarios"."levantamientos" LIMIT :lim OFFSET :off'
+          ),
+          con=engine_pg,
+          params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
+      )
+      if "_Ultima_actualizacion" in df_t2.columns:
+        df_t2_vista = df_t2.drop(columns=["_Ultima_actualizacion"])
+      else:
+        df_t2_vista = df_t2
+
+      st.dataframe(df_t2_vista, use_container_width=True, height=450)
+    except Exception as e:
+      st.error(f"Error al cargar datos de PostgreSQL: {e}")
+  else:
+    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
+
+with tab2:
+  st.subheader(
+      "🔍 Explorador Completo de TODOS los Registros (Con geom UTM y fid)"
+  )
+  st.markdown(
+      "Visualiza absolutamente todos los registros existentes en el servidor"
+      " con su geometría UTM calculada en el campo `geom`."
+  )
+
+  input_busqueda_serie = st.text_input(
+      "Buscar número de serie de medidor (Filtro en tiempo real)",
+      value="",
+      key="input_busq_levantamientos_full",
+  )
+
+  df_levantamientos_full = consultar_api_levantamientos_todos(size_lote=200)
+
+  if df_levantamientos_full.empty:
+    st.warning("No se encontraron registros en el endpoint.")
+  else:
+    if input_busqueda_serie.strip() != "":
+      termino = input_busqueda_serie.strip().lower()
+      if "serie" in df_levantamientos_full.columns:
+        df_levantamientos_full = df_levantamientos_full[
+            df_levantamientos_full["serie"]
+            .astype(str)
+            .str.lower()
+            .str.contains(termino, na=False)
+        ]
+
+    st.success(
+        f"¡Se cargaron y filtraron un total de"
+        f" **{len(df_levantamientos_full):,}** registros con su columna"
+        " `geom`!"
+    )
+
+    # ==========================================
+    # 10. ANÁLISIS Y VALIDACIÓN DE SERIES DUPLICADAS
+    # ==========================================
+    if "serie" in df_levantamientos_full.columns:
+      series_limpias = (
+          df_levantamientos_full["serie"].dropna().astype(str).str.strip()
+      )
+      series_limpias = series_limpias[
+          ~series_limpias.str.lower().isin(["", "none", "nan", "null"])
+      ]
+      conteo_series = series_limpias.value_counts()
+      series_duplicadas = conteo_series[conteo_series > 1]
+
+      if not series_duplicadas.empty:
+        st.error(
+            f"⚠️ **¡Atención! Se detectaron {len(series_duplicadas)}"
+            " números de serie de medidor duplicados.**"
+        )
+        df_dup_detalle = df_levantamientos_full[
+            df_levantamientos_full["serie"]
+            .astype(str)
+            .str.strip()
+            .isin(series_duplicadas.index)
+        ].sort_values(by="serie")
+
+        with st.expander(
+            "🔎 Ver Detalle de Registros con Series Duplicadas", expanded=False
+        ):
+          if "_Ultima_actualizacion" in df_dup_detalle.columns:
+            df_dup_vista = df_dup_detalle.drop(
+                columns=["_Ultima_actualizacion"]
+            )
+          else:
+            df_dup_vista = df_dup_detalle
+          st.dataframe(df_dup_vista, use_container_width=True, height=250)
+      else:
+        st.success(
+            "✅ **Validación exitosa:** No existen números de serie de medidor"
+            " repetidos en los registros mostrados."
+        )
+
+    if "_Ultima_actualizacion" in df_levantamientos_full.columns:
+      df_vista_full = df_levantamientos_full.drop(
+          columns=["_Ultima_actualizacion"]
+      )
+    else:
+      df_vista_full = df_levantamientos_full
+
+    st.dataframe(df_vista_full, use_container_width=True, height=500)
+
+    with st.container(border=True):
+      st.markdown(
+          "#### ⚙ Sincronización Manual hacia la Tabla"
+          " `Usuarios.levantamientos`"
+      )
+      st.markdown(
+          "Ejecuta la sincronización inmediata para guardar estos datos en"
+          " tu base de datos."
+      )
+      if st.button(
+          "Sincronizar a la Tabla 'Usuarios.levantamientos'",
+          key="btn_sinc_levantamientos_manual",
+          type="primary",
+      ):
+        with st.spinner("Sincronizando datos en base de datos..."):
+          exito = ejecutar_sincronizacion_levantamientos()
+          if exito:
+            st.success("¡Sincronización completada con éxito!")
+            st.rerun()
+          else:
+            st.error("Ocurrió un error durante la sincronización.")
