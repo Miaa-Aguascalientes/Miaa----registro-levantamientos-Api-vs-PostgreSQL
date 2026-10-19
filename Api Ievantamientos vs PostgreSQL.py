@@ -149,9 +149,7 @@ def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
-      result = conn.execute(
-          text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"')
-      )
+      result = conn.execute(text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"'))
       return result.scalar()
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
@@ -183,89 +181,6 @@ def obtener_token_api():
   return None
 
 
-def convertir_latlon_a_xy(lat, lon):
-  try:
-    if pd.isna(lat) or pd.isna(lon):
-      return None, None
-    lat_f = float(lat)
-    lon_f = float(lon)
-    if lat_f == 0.0 or lon_f == 0.0:
-      return None, None
-
-    try:
-      from pyproj import Transformer
-
-      transformer = Transformer.from_crs(
-          "EPSG:4326", "EPSG:32613", always_xy=True
-      )
-      x, y = transformer.transform(lon_f, lat_f)
-      return round(x, 4), round(y, 4)
-    except ImportError:
-      a = 6378137.0
-      eccSquared = 0.00669438
-      k0 = 0.9996
-
-      latRad = math.radians(lat_f)
-      lonRad = math.radians(lon_f)
-
-      zoneNumber = 13
-      lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
-      lonOriginRad = math.radians(lonOrigin)
-
-      e2 = eccSquared / (1 - eccSquared)
-      N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
-      T = math.tan(latRad) ** 2
-      C = e2 * math.cos(latRad) ** 2
-      A = math.cos(latRad) * (lonRad - lonOriginRad)
-
-      M = a * (
-          (
-              1
-              - eccSquared / 4
-              - 3 * eccSquared**2 / 64
-              - 5 * eccSquared**3 / 256
-          )
-          * latRad
-          - (
-              3 * eccSquared / 8
-              + 3 * eccSquared**2 / 32
-              + 45 * eccSquared**3 / 1024
-          )
-          * math.sin(2 * latRad)
-          + (15 * eccSquared**2 / 256 + 45 * eccSquared**3 / 1024)
-          * math.sin(4 * latRad)
-          - (35 * eccSquared**3 / 3072) * math.sin(6 * latRad)
-      )
-
-      x = (
-          k0
-          * N
-          * (
-              A
-              + (1 - T + C) * A**3 / 6
-              + (5 - 18 * T + T**2 + 72 * C - 58 * e2) * A**5 / 120
-          )
-          + 500000.0
-      )
-      y = (
-          k0
-          * (
-              M
-              + N
-              * math.tan(latRad)
-              * (
-                  A**2 / 2
-                  + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
-                  + (61 - 58 * T + T**2 + 600 * C - 330 * e2) * A**6 / 720
-              )
-          )
-      )
-
-      return round(x, 4), round(y, 4)
-  except Exception:
-    return None, None
-
-
 def convertir_latlon_a_utm_wkt(lat, lon):
   try:
     if pd.isna(lat) or pd.isna(lon):
@@ -278,9 +193,7 @@ def convertir_latlon_a_utm_wkt(lat, lon):
     try:
       from pyproj import Transformer
 
-      transformer = Transformer.from_crs(
-          "EPSG:4326", "EPSG:32613", always_xy=True
-      )
+      transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
       x, y = transformer.transform(lon_f, lat_f)
       return f"POINT({x:.4f} {y:.4f})"
     except ImportError:
@@ -423,11 +336,7 @@ def consultar_api_levantamientos_todos(size_lote=200):
         None,
     )
     col_api_unidad = next(
-        (
-            c
-            for c in ["unidad", "unidadViv", "unidad_viv"]
-            if c in df_final.columns
-        ),
+        (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df_final.columns),
         None,
     )
 
@@ -474,21 +383,10 @@ def consultar_api_levantamientos_todos(size_lote=200):
           lambda r: convertir_latlon_a_utm_wkt(r["Latitud"], r["Longitud"]),
           axis=1,
       )
-
-      xs = []
-      ys = []
-      for _, row in df_final.iterrows():
-        x_val, y_val = convertir_latlon_a_xy(row["Latitud"], row["Longitud"])
-        xs.append(x_val)
-        ys.append(y_val)
-      df_final["X"] = xs
-      df_final["Y"] = ys
     else:
       df_final["Latitud"] = None
       df_final["Longitud"] = None
       df_final["geom"] = None
-      df_final["X"] = None
-      df_final["Y"] = None
 
     if "id" in df_final.columns and "medidorId" not in df_final.columns:
       df_final["medidorId"] = df_final["id"]
@@ -547,8 +445,7 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.60,
-      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando todo lo"
-      " nuevo sin tocar los existentes...",
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando todo lo nuevo sin tocar los existentes...",
   )
 
   try:
@@ -601,8 +498,7 @@ def ejecutar_sincronizacion_levantamientos(
     actualizar_progreso(
         1.0,
         f"🎉 [CICLO EXITOSO] Sincronización completada."
-        f" Se evaluaron {total_descargados:,} registros de la API. Los"
-        " existentes se respetaron intactos.",
+        f" Se evaluaron {total_descargados:,} registros de la API. Los existentes se respetaron intactos.",
     )
     return True
   except Exception as ex:
@@ -717,23 +613,14 @@ with st.sidebar:
   st.markdown("#### ⚠️ Zona de Peligro")
 
   if not st.session_state.confirmar_borrado_total:
-    if st.button(
-        "🗑️ Vaciar Tabla Levantamientos",
-        type="secondary",
-        use_container_width=True,
-    ):
+    if st.button("🗑️ Vaciar Tabla Levantamientos", type="secondary", use_container_width=True):
       st.session_state.confirmar_borrado_total = True
       st.rerun()
   else:
     st.warning("¿Estás seguro? Se borrarán TODOS los registros.")
     col_b1, col_b2 = st.columns(2)
     with col_b1:
-      if st.button(
-          "Sí, vaciar",
-          type="primary",
-          use_container_width=True,
-          key="btn_si_vaciar",
-      ):
+      if st.button("Sí, vaciar", type="primary", use_container_width=True, key="btn_si_vaciar"):
         try:
           engine_pg = obtener_motor_postgres()
           with engine_pg.begin() as conn:
@@ -748,12 +635,7 @@ with st.sidebar:
         time.sleep(1)
         st.rerun()
     with col_b2:
-      if st.button(
-          "Cancelar",
-          type="secondary",
-          use_container_width=True,
-          key="btn_no_vaciar",
-      ):
+      if st.button("Cancelar", type="secondary", use_container_width=True, key="btn_no_vaciar"):
         st.session_state.confirmar_borrado_total = False
         st.rerun()
 
@@ -908,53 +790,45 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Registros de la API (Búsqueda Global)",
+    "🚰 Tabla PostgreSQL: Usuarios.levantamientos",
     "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
-      "<p style='font-size:16px; font-weight:bold;"
-      " margin-bottom:10px;'>Datos de la API con búsqueda global en todas las páginas y coordenadas X, Y calculadas</p>",
+      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
+      " almacenados en la tabla PostgreSQL: <code>Usuarios.levantamientos</code></p>",
       unsafe_allow_html=True,
   )
+  if total_registros_db > 0:
+    try:
+      engine_pg = obtener_motor_postgres()
+      t2_filas = 50
+      t2_total_pags = max(
+          1,
+          (total_registros_db // t2_filas)
+          + (1 if total_registros_db % t2_filas > 0 else 0),
+      )
+      t2_pag = st.selectbox(
+          "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
+      )
+      df_t2 = pd.read_sql(
+          text(
+              'SELECT * FROM "Usuarios"."levantamientos" LIMIT :lim OFFSET :off'
+          ),
+          con=engine_pg,
+          params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
+      )
+      if "_Ultima_actualizacion" in df_t2.columns:
+        df_t2_vista = df_t2.drop(columns=["_Ultima_actualizacion"])
+      else:
+        df_t2_vista = df_t2
 
-  busqueda_tab1 = st.text_input(
-      "🔎 Buscar por Serie, Medidor o Predio (en todas las páginas)",
-      value="",
-      key="input_busq_tab1_api_global",
-      placeholder="Escribe la serie, ID de medidor o predio...",
-  )
-
-  df_api_global = consultar_api_levantamientos_todos(size_lote=200)
-
-  if not df_api_global.empty:
-    df_api_mostrar = df_api_global.copy()
-    if busqueda_tab1.strip() != "":
-      term = busqueda_tab1.strip().lower()
-      condiciones = pd.Series(False, index=df_api_mostrar.index)
-
-      for col in ["serie", "medidorId", "id", "predio", "predioViv", "Predio_Viv"]:
-        if col in df_api_mostrar.columns:
-          condiciones = condiciones | (
-              df_api_mostrar[col]
-              .astype(str)
-              .str.lower()
-              .str.contains(term, na=False)
-          )
-      df_api_mostrar = df_api_mostrar[condiciones]
-
-    if "_Ultima_actualizacion" in df_api_mostrar.columns:
-      df_api_vista = df_api_mostrar.drop(columns=["_Ultima_actualizacion"])
-    else:
-      df_api_vista = df_api_mostrar
-
-    st.success(
-        f"Se encontraron **{len(df_api_vista):,}** registros coincidentes de un total de **{len(df_api_global):,}** registros en la API."
-    )
-    st.dataframe(df_api_vista, use_container_width=True, height=500)
+      st.dataframe(df_t2_vista, use_container_width=True, height=450)
+    except Exception as e:
+      st.error(f"Error al cargar datos de PostgreSQL: {e}")
   else:
-    st.warning("No se encontraron registros en la API de Levantamientos.")
+    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
 
 with tab2:
   st.subheader(
