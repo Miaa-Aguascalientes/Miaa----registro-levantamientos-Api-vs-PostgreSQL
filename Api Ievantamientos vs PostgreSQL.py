@@ -821,8 +821,8 @@ tab1, tab2 = st.tabs([
 with tab1:
   st.markdown(
       "<p style='font-size:16px; font-weight:bold;"
-      " margin-bottom:10px;'>Registros obtenidos directamente desde la API de"
-      " Levantamientos</p>",
+      " margin-bottom:10px;'>Registros originales obtenidos directamente"
+      " desde la API de Levantamientos (sin filtros)</p>",
       unsafe_allow_html=True,
   )
   if not df_lev_preview.empty:
