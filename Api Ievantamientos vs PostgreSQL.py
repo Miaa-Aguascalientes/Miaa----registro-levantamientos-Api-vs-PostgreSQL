@@ -183,6 +183,89 @@ def obtener_token_api():
   return None
 
 
+def convertir_latlon_a_xy(lat, lon):
+  try:
+    if pd.isna(lat) or pd.isna(lon):
+      return None, None
+    lat_f = float(lat)
+    lon_f = float(lon)
+    if lat_f == 0.0 or lon_f == 0.0:
+      return None, None
+
+    try:
+      from pyproj import Transformer
+
+      transformer = Transformer.from_crs(
+          "EPSG:4326", "EPSG:32613", always_xy=True
+      )
+      x, y = transformer.transform(lon_f, lat_f)
+      return round(x, 4), round(y, 4)
+    except ImportError:
+      a = 6378137.0
+      eccSquared = 0.00669438
+      k0 = 0.9996
+
+      latRad = math.radians(lat_f)
+      lonRad = math.radians(lon_f)
+
+      zoneNumber = 13
+      lonOrigin = (zoneNumber - 1) * 6 - 180 + 3
+      lonOriginRad = math.radians(lonOrigin)
+
+      e2 = eccSquared / (1 - eccSquared)
+      N = a / math.sqrt(1 - eccSquared * math.sin(latRad) ** 2)
+      T = math.tan(latRad) ** 2
+      C = e2 * math.cos(latRad) ** 2
+      A = math.cos(latRad) * (lonRad - lonOriginRad)
+
+      M = a * (
+          (
+              1
+              - eccSquared / 4
+              - 3 * eccSquared**2 / 64
+              - 5 * eccSquared**3 / 256
+          )
+          * latRad
+          - (
+              3 * eccSquared / 8
+              + 3 * eccSquared**2 / 32
+              + 45 * eccSquared**3 / 1024
+          )
+          * math.sin(2 * latRad)
+          + (15 * eccSquared**2 / 256 + 45 * eccSquared**3 / 1024)
+          * math.sin(4 * latRad)
+          - (35 * eccSquared**3 / 3072) * math.sin(6 * latRad)
+      )
+
+      x = (
+          k0
+          * N
+          * (
+              A
+              + (1 - T + C) * A**3 / 6
+              + (5 - 18 * T + T**2 + 72 * C - 58 * e2) * A**5 / 120
+          )
+          + 500000.0
+      )
+      y = (
+          k0
+          * (
+              M
+              + N
+              * math.tan(latRad)
+              * (
+                  A**2 / 2
+                  + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
+                  + (61 - 58 * T + T**2 + 600 * C - 330 * e2) * A**6 / 720
+              )
+          )
+      )
+
+      return round(x, 4), round(y, 4)
+  except Exception:
+    return None, None
+
+
 @st.cache_data(ttl=60)
 def consultar_pagina_api_bruta(page=0, size=50):
   token = obtener_token_api()
@@ -200,13 +283,50 @@ def consultar_pagina_api_bruta(page=0, size=50):
     )
     if res.status_code == 200:
       data = res.json()
+      df_lote = pd.DataFrame()
       if isinstance(data, list):
-        return pd.DataFrame(data)
+        df_lote = pd.DataFrame(data)
       elif isinstance(data, dict):
         for key in ["content", "data", "result", "items", "levantamientos"]:
           if key in data and isinstance(data[key], list):
-            return pd.DataFrame(data[key])
-        return pd.DataFrame([data])
+            df_lote = pd.DataFrame(data[key])
+            break
+        if df_lote.empty:
+          df_lote = pd.DataFrame([data])
+
+      if not df_lote.empty:
+        col_lat = next(
+            (
+                c
+                for c in ["latitud", "lat", "latitude", "y", "Latitud"]
+                if c in df_lote.columns
+            ),
+            None,
+        )
+        col_lon = next(
+            (
+                c
+                for c in ["longitud", "lon", "lng", "longitude", "x", "Longitud"]
+                if c in df_lote.columns
+            ),
+            None,
+        )
+
+        xs = []
+        ys = []
+        if col_lat and col_lon:
+          for _, row in df_lote.iterrows():
+            x_val, y_val = convertir_latlon_a_xy(row[col_lat], row[col_lon])
+            xs.append(x_val)
+            ys.append(y_val)
+        else:
+          xs = [None] * len(df_lote)
+          ys = [None] * len(df_lote)
+
+        df_lote["X"] = xs
+        df_lote["Y"] = ys
+
+      return df_lote
   except Exception:
     pass
   return pd.DataFrame()
@@ -850,8 +970,8 @@ tab1, tab2 = st.tabs([
 with tab1:
   st.markdown(
       "<p style='font-size:16px; font-weight:bold;"
-      " margin-bottom:10px;'>Datos crudos originales obtenidos directamente"
-      " del Endpoint de la API (con paginación propia)</p>",
+      " margin-bottom:10px;'>Datos crudos de la API con coordenadas X y Y"
+      " calculadas</p>",
       unsafe_allow_html=True,
   )
 
@@ -871,11 +991,34 @@ with tab1:
   df_api_raw = consultar_pagina_api_bruta(page=api_page, size=api_size)
 
   if not df_api_raw.empty:
-    st.success(
-        f"Se consultó exitosamente la página {api_page} con"
-        f" {len(df_api_raw)} registros crudos de la API."
+    # Barra de búsqueda por serie, medidor o predio
+    busqueda_tab1 = st.text_input(
+        "🔎 Buscar por Serie, Medidor o Predio",
+        value="",
+        key="input_busq_tab1_api",
+        placeholder="Escribe la serie, ID de medidor o predio...",
     )
-    st.dataframe(df_api_raw, use_container_width=True, height=450)
+
+    df_api_mostrar = df_api_raw.copy()
+    if busqueda_tab1.strip() != "":
+      term = busqueda_tab1.strip().lower()
+      condiciones = pd.Series(False, index=df_api_mostrar.index)
+
+      for col in ["serie", "medidorId", "id", "predio", "predioViv"]:
+        if col in df_api_mostrar.columns:
+          condiciones = condiciones | (
+              df_api_mostrar[col]
+              .astype(str)
+              .str.lower()
+              .str.contains(term, na=False)
+          )
+      df_api_mostrar = df_api_mostrar[condiciones]
+
+    st.success(
+        f"Mostrando {len(df_api_mostrar)} de {len(df_api_raw)} registros de la"
+        f" página {api_page}."
+    )
+    st.dataframe(df_api_mostrar, use_container_width=True, height=450)
   else:
     st.warning(
         "No se pudieron obtener registros o se alcanzó el final de la API."
