@@ -183,6 +183,35 @@ def obtener_token_api():
   return None
 
 
+@st.cache_data(ttl=60)
+def consultar_pagina_api_bruta(page=0, size=50):
+  token = obtener_token_api()
+  if not token:
+    return pd.DataFrame()
+  try:
+    res = requests.get(
+        URL_LEVANTAMIENTOS,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        params={"page": page, "size": size},
+        timeout=30,
+    )
+    if res.status_code == 200:
+      data = res.json()
+      if isinstance(data, list):
+        return pd.DataFrame(data)
+      elif isinstance(data, dict):
+        for key in ["content", "data", "result", "items", "levantamientos"]:
+          if key in data and isinstance(data[key], list):
+            return pd.DataFrame(data[key])
+        return pd.DataFrame([data])
+  except Exception:
+    pass
+  return pd.DataFrame()
+
+
 def convertir_latlon_a_utm_wkt(lat, lon):
   try:
     if pd.isna(lat) or pd.isna(lon):
@@ -814,26 +843,43 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Registros de la API: Levantamientos",
+    "🚰 Registros Crudos de la API",
     "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
       "<p style='font-size:16px; font-weight:bold;"
-      " margin-bottom:10px;'>Registros originales obtenidos directamente"
-      " desde la API de Levantamientos (sin filtros)</p>",
+      " margin-bottom:10px;'>Datos crudos originales obtenidos directamente"
+      " del Endpoint de la API (con paginación propia)</p>",
       unsafe_allow_html=True,
   )
-  if not df_lev_preview.empty:
-    if "_Ultima_actualizacion" in df_lev_preview.columns:
-      df_t1_vista = df_lev_preview.drop(columns=["_Ultima_actualizacion"])
-    else:
-      df_t1_vista = df_lev_preview
 
-    st.dataframe(df_t1_vista, use_container_width=True, height=450)
+  col_p1, col_p2 = st.columns([2, 2])
+  with col_p1:
+    api_page = st.number_input(
+        "Página de la API", min_value=0, value=0, step=1, key="num_page_api_raw"
+    )
+  with col_p2:
+    api_size = st.selectbox(
+        "Registros por página",
+        [10, 25, 50, 100, 200],
+        index=2,
+        key="sel_size_api_raw",
+    )
+
+  df_api_raw = consultar_pagina_api_bruta(page=api_page, size=api_size)
+
+  if not df_api_raw.empty:
+    st.success(
+        f"Se consultó exitosamente la página {api_page} con"
+        f" {len(df_api_raw)} registros crudos de la API."
+    )
+    st.dataframe(df_api_raw, use_container_width=True, height=450)
   else:
-    st.warning("No se encontraron registros en la API de Levantamientos.")
+    st.warning(
+        "No se pudieron obtener registros o se alcanzó el final de la API."
+    )
 
 with tab2:
   st.subheader(
