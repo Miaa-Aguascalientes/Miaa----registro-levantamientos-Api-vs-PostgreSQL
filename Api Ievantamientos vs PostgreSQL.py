@@ -266,72 +266,6 @@ def convertir_latlon_a_xy(lat, lon):
     return None, None
 
 
-@st.cache_data(ttl=60)
-def consultar_pagina_api_bruta(page=0, size=50):
-  token = obtener_token_api()
-  if not token:
-    return pd.DataFrame()
-  try:
-    res = requests.get(
-        URL_LEVANTAMIENTOS,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        params={"page": page, "size": size},
-        timeout=30,
-    )
-    if res.status_code == 200:
-      data = res.json()
-      df_lote = pd.DataFrame()
-      if isinstance(data, list):
-        df_lote = pd.DataFrame(data)
-      elif isinstance(data, dict):
-        for key in ["content", "data", "result", "items", "levantamientos"]:
-          if key in data and isinstance(data[key], list):
-            df_lote = pd.DataFrame(data[key])
-            break
-        if df_lote.empty:
-          df_lote = pd.DataFrame([data])
-
-      if not df_lote.empty:
-        col_lat = next(
-            (
-                c
-                for c in ["latitud", "lat", "latitude", "y", "Latitud"]
-                if c in df_lote.columns
-            ),
-            None,
-        )
-        col_lon = next(
-            (
-                c
-                for c in ["longitud", "lon", "lng", "longitude", "x", "Longitud"]
-                if c in df_lote.columns
-            ),
-            None,
-        )
-
-        xs = []
-        ys = []
-        if col_lat and col_lon:
-          for _, row in df_lote.iterrows():
-            x_val, y_val = convertir_latlon_a_xy(row[col_lat], row[col_lon])
-            xs.append(x_val)
-            ys.append(y_val)
-        else:
-          xs = [None] * len(df_lote)
-          ys = [None] * len(df_lote)
-
-        df_lote["X"] = xs
-        df_lote["Y"] = ys
-
-      return df_lote
-  except Exception:
-    pass
-  return pd.DataFrame()
-
-
 def convertir_latlon_a_utm_wkt(lat, lon):
   try:
     if pd.isna(lat) or pd.isna(lon):
@@ -540,10 +474,21 @@ def consultar_api_levantamientos_todos(size_lote=200):
           lambda r: convertir_latlon_a_utm_wkt(r["Latitud"], r["Longitud"]),
           axis=1,
       )
+
+      xs = []
+      ys = []
+      for _, row in df_final.iterrows():
+        x_val, y_val = convertir_latlon_a_xy(row["Latitud"], row["Longitud"])
+        xs.append(x_val)
+        ys.append(y_val)
+      df_final["X"] = xs
+      df_final["Y"] = ys
     else:
       df_final["Latitud"] = None
       df_final["Longitud"] = None
       df_final["geom"] = None
+      df_final["X"] = None
+      df_final["Y"] = None
 
     if "id" in df_final.columns and "medidorId" not in df_final.columns:
       df_final["medidorId"] = df_final["id"]
@@ -963,48 +908,33 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Registros Crudos de la API",
+    "🚰 Registros de la API (Búsqueda Global)",
     "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
       "<p style='font-size:16px; font-weight:bold;"
-      " margin-bottom:10px;'>Datos crudos de la API con coordenadas X y Y"
-      " calculadas</p>",
+      " margin-bottom:10px;'>Datos de la API con búsqueda global en todas las páginas y coordenadas X, Y calculadas</p>",
       unsafe_allow_html=True,
   )
 
-  col_p1, col_p2 = st.columns([2, 2])
-  with col_p1:
-    api_page = st.number_input(
-        "Página de la API", min_value=0, value=0, step=1, key="num_page_api_raw"
-    )
-  with col_p2:
-    api_size = st.selectbox(
-        "Registros por página",
-        [10, 25, 50, 100, 200],
-        index=2,
-        key="sel_size_api_raw",
-    )
+  busqueda_tab1 = st.text_input(
+      "🔎 Buscar por Serie, Medidor o Predio (en todas las páginas)",
+      value="",
+      key="input_busq_tab1_api_global",
+      placeholder="Escribe la serie, ID de medidor o predio...",
+  )
 
-  df_api_raw = consultar_pagina_api_bruta(page=api_page, size=api_size)
+  df_api_global = consultar_api_levantamientos_todos(size_lote=200)
 
-  if not df_api_raw.empty:
-    # Barra de búsqueda por serie, medidor o predio
-    busqueda_tab1 = st.text_input(
-        "🔎 Buscar por Serie, Medidor o Predio",
-        value="",
-        key="input_busq_tab1_api",
-        placeholder="Escribe la serie, ID de medidor o predio...",
-    )
-
-    df_api_mostrar = df_api_raw.copy()
+  if not df_api_global.empty:
+    df_api_mostrar = df_api_global.copy()
     if busqueda_tab1.strip() != "":
       term = busqueda_tab1.strip().lower()
       condiciones = pd.Series(False, index=df_api_mostrar.index)
 
-      for col in ["serie", "medidorId", "id", "predio", "predioViv"]:
+      for col in ["serie", "medidorId", "id", "predio", "predioViv", "Predio_Viv"]:
         if col in df_api_mostrar.columns:
           condiciones = condiciones | (
               df_api_mostrar[col]
@@ -1014,15 +944,17 @@ with tab1:
           )
       df_api_mostrar = df_api_mostrar[condiciones]
 
+    if "_Ultima_actualizacion" in df_api_mostrar.columns:
+      df_api_vista = df_api_mostrar.drop(columns=["_Ultima_actualizacion"])
+    else:
+      df_api_vista = df_api_mostrar
+
     st.success(
-        f"Mostrando {len(df_api_mostrar)} de {len(df_api_raw)} registros de la"
-        f" página {api_page}."
+        f"Se encontraron **{len(df_api_vista):,}** registros coincidentes de un total de **{len(df_api_global):,}** registros en la API."
     )
-    st.dataframe(df_api_mostrar, use_container_width=True, height=450)
+    st.dataframe(df_api_vista, use_container_width=True, height=500)
   else:
-    st.warning(
-        "No se pudieron obtener registros o se alcanzó el final de la API."
-    )
+    st.warning("No se encontraron registros en la API de Levantamientos.")
 
 with tab2:
   st.subheader(
