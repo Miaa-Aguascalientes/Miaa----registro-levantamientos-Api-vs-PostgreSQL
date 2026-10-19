@@ -149,7 +149,9 @@ def obtener_total_registros_levantamientos_db():
   try:
     engine_pg = obtener_motor_postgres()
     with engine_pg.connect() as conn:
-      result = conn.execute(text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"'))
+      result = conn.execute(
+          text('SELECT COUNT(*) FROM "Usuarios"."levantamientos"')
+      )
       return result.scalar()
   except Exception as e:
     agregar_log(f"⚠️ [AVISO DB] No se pudo obtener el conteo de registros: {e}")
@@ -193,7 +195,9 @@ def convertir_latlon_a_utm_wkt(lat, lon):
     try:
       from pyproj import Transformer
 
-      transformer = Transformer.from_crs("EPSG:4326", "EPSG:32613", always_xy=True)
+      transformer = Transformer.from_crs(
+          "EPSG:4326", "EPSG:32613", always_xy=True
+      )
       x, y = transformer.transform(lon_f, lat_f)
       return f"POINT({x:.4f} {y:.4f})"
     except ImportError:
@@ -336,7 +340,11 @@ def consultar_api_levantamientos_todos(size_lote=200):
         None,
     )
     col_api_unidad = next(
-        (c for c in ["unidad", "unidadViv", "unidad_viv"] if c in df_final.columns),
+        (
+            c
+            for c in ["unidad", "unidadViv", "unidad_viv"]
+            if c in df_final.columns
+        ),
         None,
     )
 
@@ -445,7 +453,8 @@ def ejecutar_sincronizacion_levantamientos(
   total_descargados = len(df_lev)
   actualizar_progreso(
       0.60,
-      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando todo lo nuevo sin tocar los existentes...",
+      f"[PASO 2/2] {total_descargados:,} registros listos. Insertando todo lo"
+      " nuevo sin tocar los existentes...",
   )
 
   try:
@@ -498,7 +507,8 @@ def ejecutar_sincronizacion_levantamientos(
     actualizar_progreso(
         1.0,
         f"🎉 [CICLO EXITOSO] Sincronización completada."
-        f" Se evaluaron {total_descargados:,} registros de la API. Los existentes se respetaron intactos.",
+        f" Se evaluaron {total_descargados:,} registros de la API. Los"
+        " existentes se respetaron intactos.",
     )
     return True
   except Exception as ex:
@@ -613,14 +623,23 @@ with st.sidebar:
   st.markdown("#### ⚠️ Zona de Peligro")
 
   if not st.session_state.confirmar_borrado_total:
-    if st.button("🗑️ Vaciar Tabla Levantamientos", type="secondary", use_container_width=True):
+    if st.button(
+        "🗑️ Vaciar Tabla Levantamientos",
+        type="secondary",
+        use_container_width=True,
+    ):
       st.session_state.confirmar_borrado_total = True
       st.rerun()
   else:
     st.warning("¿Estás seguro? Se borrarán TODOS los registros.")
     col_b1, col_b2 = st.columns(2)
     with col_b1:
-      if st.button("Sí, vaciar", type="primary", use_container_width=True, key="btn_si_vaciar"):
+      if st.button(
+          "Sí, vaciar",
+          type="primary",
+          use_container_width=True,
+          key="btn_si_vaciar",
+      ):
         try:
           engine_pg = obtener_motor_postgres()
           with engine_pg.begin() as conn:
@@ -635,7 +654,12 @@ with st.sidebar:
         time.sleep(1)
         st.rerun()
     with col_b2:
-      if st.button("Cancelar", type="secondary", use_container_width=True, key="btn_no_vaciar"):
+      if st.button(
+          "Cancelar",
+          type="secondary",
+          use_container_width=True,
+          key="btn_no_vaciar",
+      ):
         st.session_state.confirmar_borrado_total = False
         st.rerun()
 
@@ -790,45 +814,26 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 # 9. PESTAÑAS DE LA APLICACIÓN
 # ==========================================
 tab1, tab2 = st.tabs([
-    "🚰 Tabla PostgreSQL: Usuarios.levantamientos",
+    "🚰 Registros de la API: Levantamientos",
     "🔍 Explorador API Levantamientos",
 ])
 
 with tab1:
   st.markdown(
-      "<p style='font-size:16px; font-weight:bold; margin-bottom:10px;'>Registros"
-      " almacenados en la tabla PostgreSQL: <code>Usuarios.levantamientos</code></p>",
+      "<p style='font-size:16px; font-weight:bold;"
+      " margin-bottom:10px;'>Registros obtenidos directamente desde la API de"
+      " Levantamientos</p>",
       unsafe_allow_html=True,
   )
-  if total_registros_db > 0:
-    try:
-      engine_pg = obtener_motor_postgres()
-      t2_filas = 50
-      t2_total_pags = max(
-          1,
-          (total_registros_db // t2_filas)
-          + (1 if total_registros_db % t2_filas > 0 else 0),
-      )
-      t2_pag = st.selectbox(
-          "Seleccionar página", range(1, t2_total_pags + 1), key="select_pag_t2"
-      )
-      df_t2 = pd.read_sql(
-          text(
-              'SELECT * FROM "Usuarios"."levantamientos" LIMIT :lim OFFSET :off'
-          ),
-          con=engine_pg,
-          params={"lim": t2_filas, "off": (t2_pag - 1) * t2_filas},
-      )
-      if "_Ultima_actualizacion" in df_t2.columns:
-        df_t2_vista = df_t2.drop(columns=["_Ultima_actualizacion"])
-      else:
-        df_t2_vista = df_t2
+  if not df_lev_preview.empty:
+    if "_Ultima_actualizacion" in df_lev_preview.columns:
+      df_t1_vista = df_lev_preview.drop(columns=["_Ultima_actualizacion"])
+    else:
+      df_t1_vista = df_lev_preview
 
-      st.dataframe(df_t2_vista, use_container_width=True, height=450)
-    except Exception as e:
-      st.error(f"Error al cargar datos de PostgreSQL: {e}")
+    st.dataframe(df_t1_vista, use_container_width=True, height=450)
   else:
-    st.warning("No hay registros en la tabla `Usuarios.levantamientos`.")
+    st.warning("No se encontraron registros en la API de Levantamientos.")
 
 with tab2:
   st.subheader(
